@@ -3,106 +3,113 @@ from pyspark.sql.types import *
 import ast
 import re
 
-def parse_nested_dict_string_with_parent(df, string_column_name):
+def parse_nested_with_lists(df, string_column_name):
     """
-    Parse a string column with structure like Key:{'key1':'val1',...} Key2:{'key2':'val2'...}
-    into flattened key-value pairs with separate parent key column
+    Parse a string column that can contain nested dicts and lists
+    Lists are expanded to multiple rows
     """
     
-    # UDF to parse the complex string structure
     @F.udf(returnType=ArrayType(StructType([
-        StructField("parent_key", StringType(), True),
-        StructField("full_key", StringType(), True),
+        StructField("top_level_key", StringType(), True),
+        StructField("full_path", StringType(), True),
         StructField("value", StringType(), True)
     ])))
-    def parse_string_to_kv_pairs(s):
+    def parse_complex_structure(s):
         if not s:
             return []
         
         result = []
         
-        # Pattern to match Key:{'key1':'val1',...}
-        pattern = r'([^:]+?):\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})'
+        # Pattern to match Key:{'key1':'val1',...} or Key:[...]
+        pattern = r'([^:]+?):\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}|\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\])'
         
         matches = re.findall(pattern, s, re.DOTALL)
         
-        for parent_key, dict_str in matches:
+        for parent_key, structure_str in matches:
             parent_key = parent_key.strip()
             
             try:
-                # Try to parse the dictionary string
-                # Replace single quotes with double quotes for JSON parsing
-                json_str = dict_str.replace("'", '"')
-                data = json.loads(json_str)
-            except:
-                try:
-                    # If JSON parsing fails, try with ast.literal_eval
-                    data = ast.literal_eval(dict_str)
-                except:
-                    # If both fail, add as raw value
-                    result.append({
-                        "parent_key": parent_key,
-                        "full_key": parent_key,
-                        "value": dict_str
-                    })
-                    continue
-            
-            # Recursively flatten the nested dictionary
-            def flatten_dict(d, prefix=''):
-                items = []
-                for k, v in d.items():
-                    new_key = f"{prefix}.{k}" if prefix else k
-                    full_key = f"{parent_key}.{new_key}"
+                # Parse the structure (dict or list)
+                data = ast.literal_eval(structure_str)
+                
+                # Recursively flatten nested structure with list handling
+                def flatten_structure(obj, path=[]):
+                    items = []
                     
-                    if isinstance(v, dict):
-                        items.extend(flatten_dict(v, new_key))
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            new_path = path + [k]
+                            items.extend(flatten_structure(v, new_path))
+                    
+                    elif isinstance(obj, list):
+                        # For lists, create indexed paths
+                        for i, item in enumerate(obj):
+                            new_path = path + [f"[{i}]"]
+                            items.extend(flatten_structure(item, new_path))
+                    
                     else:
+                        # Leaf value
+                        if path:
+                            full_key = f"{parent_key}.{'.'.join(path)}"
+                        else:
+                            full_key = parent_key
+                        
                         items.append({
-                            "parent_key": parent_key,
-                            "full_key": full_key,
-                            "value": str(v)
+                            "top_level_key": parent_key,
+                            "full_path": full_key,
+                            "value": str(obj)
                         })
-                return items
-            
-            result.extend(flatten_dict(data))
+                    
+                    return items
+                
+                result.extend(flatten_structure(data))
+                
+            except:
+                # If parsing fails, add as a single entry
+                result.append({
+                    "top_level_key": parent_key,
+                    "full_path": parent_key,
+                    "value": structure_str
+                })
         
         return result
     
-    # Apply the UDF to create an array of key-value pairs
-    df_with_kv = df.withColumn("kv_pairs", parse_string_to_kv_pairs(F.col(string_column_name)))
+    # Apply the UDF and explode
+    df_parsed = df.withColumn("parsed_items", parse_complex_structure(F.col(string_column_name)))
     
-    # Explode the array to create separate rows for each key-value pair
-    df_exploded = df_with_kv.select(
+    df_final = df_parsed.select(
         "*",
-        F.explode("kv_pairs").alias("parsed_kv")  # Changed alias to avoid conflict
+        F.explode("parsed_items").alias("item")
     ).select(
         "*",
-        F.col("parsed_kv.parent_key").alias("parent_key"),
-        F.col("parsed_kv.full_key").alias("parsed_key"),
-        F.col("parsed_kv.value").alias("parsed_value")
-    )
+        F.col("item.top_level_key").alias("top_level_key"),
+        F.col("item.full_path").alias("full_path"),
+        F.col("item.value").alias("parsed_value")
+    ).drop("parsed_items", "item")
     
-    return df_exploded
+    return df_final
 
-# Alternative approach with more detailed parsing
-def parse_with_hierarchy(df, string_column_name):
+def parse_with_advanced_list_handling(df, string_column_name):
     """
-    Parse with complete hierarchy information
+    Advanced parser that handles complex nested structures with lists and dicts
+    Provides more detailed path information
     """
     
     @F.udf(returnType=ArrayType(StructType([
         StructField("top_level_key", StringType(), True),
-        StructField("nested_path", StringType(), True),
+        StructField("path_elements", ArrayType(StringType()), True),  # Array of path elements
         StructField("full_path", StringType(), True),
-        StructField("value", StringType(), True)
+        StructField("path_type", StringType(), True),  # "dict_key" or "list_index"
+        StructField("value", StringType(), True),
+        StructField("value_type", StringType(), True)  # Type of the value
     ])))
-    def parse_hierarchical(s):
+    def parse_advanced(s):
         if not s:
             return []
         
         result = []
         
-        # State machine approach for parsing
+        # Parse top-level structures
         i = 0
         while i < len(s):
             # Skip whitespace
@@ -112,7 +119,7 @@ def parse_with_hierarchy(df, string_column_name):
             if i >= len(s):
                 break
             
-            # Find the top-level key (everything before ':')
+            # Find the top-level key
             key_start = i
             while i < len(s) and s[i] != ':':
                 i += 1
@@ -123,114 +130,6 @@ def parse_with_hierarchy(df, string_column_name):
             top_level_key = s[key_start:i].strip()
             i += 1  # Skip ':'
             
-            # Skip whitespace after ':'
-            while i < len(s) and s[i].isspace():
-                i += 1
-            
-            # Now we should have a '{'
-            if i >= len(s) or s[i] != '{':
-                continue
-                
-            # Find matching closing brace
-            brace_count = 0
-            dict_start = i
-            
-            while i < len(s):
-                if s[i] == '{':
-                    brace_count += 1
-                elif s[i] == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        break
-                i += 1
-            
-            if brace_count != 0:
-                continue
-                
-            i += 1  # Include the closing brace
-            dict_str = s[dict_start:i]
-            
-            try:
-                # Parse the dictionary
-                data = ast.literal_eval(dict_str)
-                
-                # Flatten nested structure with hierarchy
-                def flatten_with_hierarchy(obj, path=[]):
-                    items = []
-                    
-                    if isinstance(obj, dict):
-                        for k, v in obj.items():
-                            new_path = path + [k]
-                            if isinstance(v, dict):
-                                items.extend(flatten_with_hierarchy(v, new_path))
-                            else:
-                                nested_path = '.'.join(new_path)
-                                full_path = f"{top_level_key}.{nested_path}"
-                                
-                                items.append({
-                                    "top_level_key": top_level_key,
-                                    "nested_path": nested_path,
-                                    "full_path": full_path,
-                                    "value": str(v)
-                                })
-                    
-                    return items
-                
-                result.extend(flatten_with_hierarchy(data))
-                
-            except:
-                # If parsing fails, add as a single entry
-                result.append({
-                    "top_level_key": top_level_key,
-                    "nested_path": "",
-                    "full_path": top_level_key,
-                    "value": dict_str
-                })
-        
-        return result
-    
-    # Create the parsed columns - FIXED VERSION
-    df_parsed = df.withColumn("parsed_data", parse_hierarchical(F.col(string_column_name)))
-    
-    # Explode the array with different alias to avoid conflict
-    df_exploded = df_parsed.select(
-        "*",
-        F.explode("parsed_data").alias("exploded_data")  # Changed alias
-    )
-    
-    # Now select the final columns
-    df_final = df_exploded.select(
-        "*",
-        F.col("exploded_data.top_level_key").alias("top_level_key"),
-        F.col("exploded_data.nested_path").alias("nested_path"),
-        F.col("exploded_data.full_path").alias("full_path"),
-        F.col("exploded_data.value").alias("parsed_value")
-    ).drop("parsed_data", "exploded_data")
-    
-    return df_final
-
-# Alternative approach: drop the intermediate column before selecting
-def parse_with_hierarchy_v2(df, string_column_name):
-    """
-    Alternative version that avoids the ambiguity error
-    """
-    
-    @F.udf(returnType=ArrayType(StructType([
-        StructField("top_level_key", StringType(), True),
-        StructField("nested_path", StringType(), True),
-        StructField("full_path", StringType(), True),
-        StructField("value", StringType(), True)
-    ])))
-    def parse_hierarchical(s):
-        # Same implementation as above
-        if not s:
-            return []
-        
-        result = []
-        
-        # State machine approach for parsing
-        i = 0
-        while i < len(s):
             # Skip whitespace
             while i < len(s) and s[i].isspace():
                 i += 1
@@ -238,123 +137,161 @@ def parse_with_hierarchy_v2(df, string_column_name):
             if i >= len(s):
                 break
             
-            # Find the top-level key (everything before ':')
-            key_start = i
-            while i < len(s) and s[i] != ':':
-                i += 1
-            
-            if i >= len(s):
-                break
-                
-            top_level_key = s[key_start:i].strip()
-            i += 1  # Skip ':'
-            
-            # Skip whitespace after ':'
-            while i < len(s) and s[i].isspace():
-                i += 1
-            
-            # Now we should have a '{'
-            if i >= len(s) or s[i] != '{':
+            # Determine structure type and find closing delimiter
+            if s[i] == '{':
+                # Dictionary
+                closing_char = '}'
+            elif s[i] == '[':
+                # List
+                closing_char = ']'
+            else:
                 continue
-                
-            # Find matching closing brace
-            brace_count = 0
-            dict_start = i
+            
+            # Find matching closing delimiter
+            delimiter_count = 0
+            struct_start = i
             
             while i < len(s):
-                if s[i] == '{':
-                    brace_count += 1
-                elif s[i] == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
+                if s[i] in '{[':
+                    delimiter_count += 1
+                elif s[i] in '}]':
+                    delimiter_count -= 1
+                    if delimiter_count == 0:
                         break
                 i += 1
             
-            if brace_count != 0:
+            if delimiter_count != 0:
                 continue
                 
-            i += 1  # Include the closing brace
-            dict_str = s[dict_start:i]
+            i += 1  # Include the closing delimiter
+            struct_str = s[struct_start:i]
             
             try:
-                # Parse the dictionary
-                data = ast.literal_eval(dict_str)
+                # Parse the structure
+                data = ast.literal_eval(struct_str)
                 
-                # Flatten nested structure with hierarchy
-                def flatten_with_hierarchy(obj, path=[]):
+                # Advanced flattening with type information
+                def flatten_advanced(obj, path_elements=[], path_types=[]):
                     items = []
                     
                     if isinstance(obj, dict):
                         for k, v in obj.items():
-                            new_path = path + [k]
-                            if isinstance(v, dict):
-                                items.extend(flatten_with_hierarchy(v, new_path))
+                            new_path_elements = path_elements + [k]
+                            new_path_types = path_types + ["dict_key"]
+                            
+                            if isinstance(v, (dict, list)):
+                                items.extend(flatten_advanced(v, new_path_elements, new_path_types))
                             else:
-                                nested_path = '.'.join(new_path)
-                                full_path = f"{top_level_key}.{nested_path}"
+                                full_path = f"{top_level_key}.{'.'.join(new_path_elements)}"
                                 
                                 items.append({
                                     "top_level_key": top_level_key,
-                                    "nested_path": nested_path,
+                                    "path_elements": new_path_elements,
                                     "full_path": full_path,
-                                    "value": str(v)
+                                    "path_type": "dict_key",
+                                    "value": str(v),
+                                    "value_type": type(v).__name__
                                 })
+                    
+                    elif isinstance(obj, list):
+                        for i, item in enumerate(obj):
+                            index_str = f"[{i}]"
+                            new_path_elements = path_elements + [index_str]
+                            new_path_types = path_types + ["list_index"]
+                            
+                            if isinstance(item, (dict, list)):
+                                items.extend(flatten_advanced(item, new_path_elements, new_path_types))
+                            else:
+                                full_path = f"{top_level_key}.{'.'.join(new_path_elements)}"
+                                
+                                items.append({
+                                    "top_level_key": top_level_key,
+                                    "path_elements": new_path_elements,
+                                    "full_path": full_path,
+                                    "path_type": "list_index",
+                                    "value": str(item),
+                                    "value_type": type(item).__name__
+                                })
+                    
+                    else:
+                        # Handle case where top level is neither dict nor list
+                        full_path = top_level_key if not path_elements else f"{top_level_key}.{'.'.join(path_elements)}"
+                        
+                        items.append({
+                            "top_level_key": top_level_key,
+                            "path_elements": path_elements,
+                            "full_path": full_path,
+                            "path_type": "value",
+                            "value": str(obj),
+                            "value_type": type(obj).__name__
+                        })
                     
                     return items
                 
-                result.extend(flatten_with_hierarchy(data))
+                result.extend(flatten_advanced(data))
                 
             except:
                 # If parsing fails, add as a single entry
                 result.append({
                     "top_level_key": top_level_key,
-                    "nested_path": "",
+                    "path_elements": [],
                     "full_path": top_level_key,
-                    "value": dict_str
+                    "path_type": "error",
+                    "value": struct_str,
+                    "value_type": "unparsed"
                 })
         
         return result
     
-    # Create temporary column with parsed data
-    df_temp = df.withColumn("_parsed_data", parse_hierarchical(F.col(string_column_name)))
+    # Apply the UDF and explode
+    df_parsed = df.withColumn("parsed_items", parse_advanced(F.col(string_column_name)))
     
-    # Explode and select in one step to avoid ambiguity
-    df_final = df_temp.selectExpr(
+    df_final = df_parsed.select(
         "*",
-        "explode(_parsed_data) as parsed_struct"
-    ).selectExpr(
+        F.explode("parsed_items").alias("item")
+    ).select(
         "*",
-        "parsed_struct.top_level_key as top_level_key",
-        "parsed_struct.nested_path as nested_path",
-        "parsed_struct.full_path as full_path",
-        "parsed_struct.value as parsed_value"
-    ).drop("_parsed_data", "parsed_struct")
+        F.col("item.top_level_key").alias("top_level_key"),
+        F.col("item.path_elements").alias("path_elements"),
+        F.col("item.full_path").alias("full_path"),
+        F.col("item.path_type").alias("path_type"),
+        F.col("item.value").alias("parsed_value"),
+        F.col("item.value_type").alias("value_type")
+    ).drop("parsed_items", "item")
     
     return df_final
 
-# Example usage with sample data:
+# Example usage with sample data including lists:
 if __name__ == "__main__":
     from pyspark.sql import SparkSession
     
-    spark = SparkSession.builder.appName("ParseNestedDicts").getOrCreate()
+    spark = SparkSession.builder.appName("ParseNestedDictsWithLists").getOrCreate()
     
-    # Sample data with nested dictionaries and spaces
+    # Sample data with lists and nested structures
     sample_data = [
-        ("Key1:{'user name':'John Doe','details':{'age':'30','city':'New York, NY'}} Key2:{'product':'laptop,mouse','price':'1000'}",),
-        ("MainKey:{'level1':{'level2':{'value':'nested,value'},'another':'test'}} SecondKey:{'simple':'value'}",)
+        # Basic dict with list
+        ("Key1:{'items':['item1','item2','item3'],'count':3} Key2:{'values':[1,2,3]}",),
+        
+        # Nested lists and dicts
+        ("Data:{'users':[{'name':'John','scores':[85,90,92]},{'name':'Jane','scores':[88,91,95]}]}",),
+        
+        # List at top level
+        ("ListKey:['value1','value2',{'nested':'dict'},['nested','list']]",),
+        
+        # Mixed complex structure
+        ("Complex:{'matrix':[[1,2,3],[4,5,6]],'metadata':{'rows':2,'cols':3},'tags':['2d','numeric']}",)
     ]
     
-    # Note: renamed the column from "data" to "input_data" to avoid confusion
     df = spark.createDataFrame(sample_data, ["input_data"])
     
-    print("Using parse_nested_dict_string_with_parent:")
-    result1 = parse_nested_dict_string_with_parent(df, "input_data")
+    print("Using parse_nested_with_lists:")
+    result1 = parse_nested_with_lists(df, "input_data")
     result1.show(truncate=False)
     
-    print("\nUsing parse_with_hierarchy (fixed):")
-    result2 = parse_with_hierarchy(df, "input_data")
+    print("\nUsing parse_with_advanced_list_handling (with detailed path info):")
+    result2 = parse_with_advanced_list_handling(df, "input_data")
     result2.show(truncate=False)
     
-    print("\nUsing parse_with_hierarchy_v2:")
-    result3 = parse_with_hierarchy_v2(df, "input_data")
-    result3.show(truncate=False)
+    # Show just a subset of columns for cleaner output
+    print("\nSimplified view:")
+    result2.select("top_level_key", "full_path", "parsed_value").show(truncate=False)
