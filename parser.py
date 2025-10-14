@@ -2,10 +2,21 @@ import React, { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { LayoutDashboard, Users, Settings, Filter, Plus, Download } from 'lucide-react';
+import { LayoutDashboard, Users, Settings, Filter, Plus, Download, X } from 'lucide-react';
 
 const ShadcnTableApp = () => {
   const [activeScreen, setActiveScreen] = useState('dashboard');
+  const [filterText, setFilterText] = useState('');
+  const [columnFilters, setColumnFilters] = useState({
+    name: '',
+    status: '',
+    department: '',
+    salary: '',
+    username: '',
+    email: '',
+    role: '',
+    active: ''
+  });
   const [dashboardData, setDashboardData] = useState([
     { id: 1, name: 'John Doe', status: 'Active', department: 'Sales', salary: '75000' },
     { id: 2, name: 'Jane Smith', status: 'Active', department: 'Marketing', salary: '68000' },
@@ -22,7 +33,6 @@ const ShadcnTableApp = () => {
     { id: 5, username: 'cbrown', email: 'charlie@example.com', role: 'Manager', active: 'Yes' },
   ]);
 
-  const [filterText, setFilterText] = useState('');
   const [dragStart, setDragStart] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const [draggedCells, setDraggedCells] = useState([]);
@@ -69,7 +79,6 @@ const ShadcnTableApp = () => {
           ? [startIndex, endIndex] 
           : [endIndex, startIndex];
         
-        // Track dragged cells for visual effect
         const cellsInRange = data.slice(minIndex, maxIndex + 1).map(row => row.id);
         setDraggedCells(cellsInRange);
         
@@ -84,13 +93,34 @@ const ShadcnTableApp = () => {
     }
   };
 
-  const filterData = (data) => {
-    if (!filterText) return data;
-    return data.filter(row => 
-      Object.values(row).some(val => 
-        String(val).toLowerCase().includes(filterText.toLowerCase())
-      )
-    );
+  const filterData = (data, columns) => {
+    return data.filter(row => {
+      return columns.every(col => {
+        const filterValue = columnFilters[col];
+        if (!filterValue || filterValue.trim() === '') return true;
+        return String(row[col]).toLowerCase().includes(filterValue.toLowerCase());
+      });
+    });
+  };
+
+  const updateColumnFilter = (column, value) => {
+    setColumnFilters(prev => ({
+      ...prev,
+      [column]: value
+    }));
+  };
+
+  const clearAllFilters = () => {
+    setColumnFilters({
+      name: '',
+      status: '',
+      department: '',
+      salary: '',
+      username: '',
+      email: '',
+      role: '',
+      active: ''
+    });
   };
 
   const addNewRow = (dataType) => {
@@ -128,20 +158,43 @@ const ShadcnTableApp = () => {
     }
   }, [isDragging]);
 
+  useEffect(() => {
+    setFilterText('');
+    setColumnFilters({
+      name: '',
+      status: '',
+      department: '',
+      salary: '',
+      username: '',
+      email: '',
+      role: '',
+      active: ''
+    });
+  }, [activeScreen]);
+
   const renderDashboardTable = () => {
-    const filteredData = filterData(dashboardData);
+    const filteredData = filterData(dashboardData, ['name', 'status', 'department', 'salary']);
+    const hasActiveFilters = (columnFilters.name && columnFilters.name.trim()) || 
+                            (columnFilters.status && columnFilters.status.trim()) || 
+                            (columnFilters.department && columnFilters.department.trim()) || 
+                            (columnFilters.salary && columnFilters.salary.trim());
     
     return (
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Filter className="h-4 w-4" />
-            <Input
-              placeholder="Filter data..."
-              value={filterText}
-              onChange={(e) => setFilterText(e.target.value)}
-              className="w-64"
-            />
+            <Filter className="h-4 w-4 text-gray-500" />
+            <span className="text-sm text-gray-600">Filter by columns below</span>
+            {hasActiveFilters && (
+              <Button 
+                onClick={clearAllFilters} 
+                variant="outline" 
+                className="gap-2 h-8 text-xs"
+              >
+                <X className="h-4 w-4" />
+                Clear Filters
+              </Button>
+            )}
           </div>
           <div className="flex gap-2">
             <Button onClick={() => addNewRow('dashboard')} className="gap-2">
@@ -165,6 +218,57 @@ const ShadcnTableApp = () => {
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Status</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Department</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Salary</th>
+                </tr>
+                <tr>
+                  <th className="px-4 py-2"></th>
+                  <th className="px-4 py-2">
+                    <Input
+                      placeholder="Filter..."
+                      value={columnFilters.name}
+                      onChange={(e) => updateColumnFilter('name', e.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  </th>
+                  <th className="px-4 py-2">
+                    <Select
+                      value={columnFilters.status}
+                      onValueChange={(value) => updateColumnFilter('status', value)}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue placeholder="All" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value=" ">All</SelectItem>
+                        {statuses.map(status => (
+                          <SelectItem key={status} value={status}>{status}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </th>
+                  <th className="px-4 py-2">
+                    <Select
+                      value={columnFilters.department}
+                      onValueChange={(value) => updateColumnFilter('department', value)}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue placeholder="All" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value=" ">All</SelectItem>
+                        {departments.map(dept => (
+                          <SelectItem key={dept} value={dept}>{dept}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </th>
+                  <th className="px-4 py-2">
+                    <Input
+                      placeholder="Filter..."
+                      value={columnFilters.salary}
+                      onChange={(e) => updateColumnFilter('salary', e.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
@@ -278,19 +382,28 @@ const ShadcnTableApp = () => {
   };
 
   const renderUsersTable = () => {
-    const filteredData = filterData(usersData);
+    const filteredData = filterData(usersData, ['username', 'email', 'role', 'active']);
+    const hasActiveFilters = (columnFilters.username && columnFilters.username.trim()) || 
+                            (columnFilters.email && columnFilters.email.trim()) || 
+                            (columnFilters.role && columnFilters.role.trim()) || 
+                            (columnFilters.active && columnFilters.active.trim());
     
     return (
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Filter className="h-4 w-4" />
-            <Input
-              placeholder="Filter users..."
-              value={filterText}
-              onChange={(e) => setFilterText(e.target.value)}
-              className="w-64"
-            />
+            <Filter className="h-4 w-4 text-gray-500" />
+            <span className="text-sm text-gray-600">Filter by columns below</span>
+            {hasActiveFilters && (
+              <Button 
+                onClick={clearAllFilters} 
+                variant="outline" 
+                className="gap-2 h-8 text-xs"
+              >
+                <X className="h-4 w-4" />
+                Clear Filters
+              </Button>
+            )}
           </div>
           <div className="flex gap-2">
             <Button onClick={() => addNewRow('users')} className="gap-2">
@@ -314,6 +427,56 @@ const ShadcnTableApp = () => {
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Email</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Role</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Active</th>
+                </tr>
+                <tr>
+                  <th className="px-4 py-2"></th>
+                  <th className="px-4 py-2">
+                    <Input
+                      placeholder="Filter..."
+                      value={columnFilters.username}
+                      onChange={(e) => updateColumnFilter('username', e.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  </th>
+                  <th className="px-4 py-2">
+                    <Input
+                      placeholder="Filter..."
+                      value={columnFilters.email}
+                      onChange={(e) => updateColumnFilter('email', e.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  </th>
+                  <th className="px-4 py-2">
+                    <Select
+                      value={columnFilters.role}
+                      onValueChange={(value) => updateColumnFilter('role', value)}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue placeholder="All" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value=" ">All</SelectItem>
+                        {roles.map(role => (
+                          <SelectItem key={role} value={role}>{role}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </th>
+                  <th className="px-4 py-2">
+                    <Select
+                      value={columnFilters.active}
+                      onValueChange={(value) => updateColumnFilter('active', value)}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue placeholder="All" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value=" ">All</SelectItem>
+                        <SelectItem value="Yes">Yes</SelectItem>
+                        <SelectItem value="No">No</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
@@ -520,4 +683,4 @@ const ShadcnTableApp = () => {
   );
 };
 
-export default ShadcnTableApp;/
+export default ShadcnTableApp;
