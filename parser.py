@@ -120,3 +120,57 @@ def export_data(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+from typing import List, Optional
+import os
+from dotenv import load_dotenv
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from datetime import datetime
+
+from . import models, schemas, crud
+from .database import engine, get_db
+def filter_columns_by_option(data: List[dict], option: str, table_key: str) -> tuple[List[dict], List[str]]:
+    """
+    Filter columns based on the export option selected
+    Returns: (filtered_data, column_headers)
+    """
+    # Define column sets for each option and table type
+    # NOTE: Use camelCase names to match the frontend data format
+    column_sets = {
+        'users': {
+            'all': ['id', 'username', 'email', 'role', 'status', 'active', 'lastLogin',
+                   'accountType', 'createdDate', 'department', 'country'],
+            'filtered': ['username', 'email', 'role', 'status', 'department'],  # Common fields
+            'selected': ['username', 'email', 'status', 'active']  # Minimal fields
+        },
+        'dashboard': {
+            'all': ['id', 'name', 'status', 'department', 'salary', 'hireDate',
+                   'location', 'manager', 'phone', 'employeeType'],
+            'filtered': ['name', 'department', 'status', 'salary', 'location'],  # Common fields
+            'selected': ['name', 'department', 'status']  # Minimal fields
+        }
+    }
+
+    # Get the columns for this table and option
+    columns = column_sets.get(table_key, {}).get(option, [])
+
+    # If no columns defined, return all
+    if not columns:
+        if data:
+            columns = list(data[0].keys())
+
+    # Filter each row to only include selected columns
+    filtered_data = []
+    for row in data:
+        filtered_row = {col: row.get(col, '') for col in columns}
+        filtered_data.append(filtered_row)
+
+    return filtered_data, columns
