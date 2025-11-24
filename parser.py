@@ -34,7 +34,59 @@ const handleExport = async () => {
       setLoading(false);
     }
   };
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+def generate_excel(data: List[dict], columns: List[str], table_key: str) -> BytesIO:
+    """
+    Generate an Excel file from the provided data
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = table_key.capitalize()
 
+    # Header styling
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=12)
+    header_alignment = Alignment(horizontal="center", vertical="center")
+
+    # Write headers
+    for col_idx, column in enumerate(columns, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        # Convert camelCase or snake_case to Title Case
+        # e.g., "lastLogin" -> "Last Login", "hire_date" -> "Hire Date"
+        import re
+        # Insert space before uppercase letters (camelCase) then title case
+        header_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', column)
+        header_text = header_text.replace('_', ' ').title()
+        cell.value = header_text
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_alignment
+
+    # Write data rows
+    for row_idx, row_data in enumerate(data, start=2):
+        for col_idx, column in enumerate(columns, start=1):
+            value = row_data.get(column, '')
+            ws.cell(row=row_idx, column=col_idx, value=str(value) if value is not None else '')
+
+    # Auto-adjust column widths
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 50)  # Cap at 50
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+    # Save to BytesIO
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
 @app.post("/api/export/{table_key}")
 def export_data(
     table_key: str,
