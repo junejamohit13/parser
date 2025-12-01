@@ -1,181 +1,297 @@
-const handleExport = async () => {
-    setLoading(true);
-    try {
-      // Get the visible rows from the table (what user sees)
-      const visibleRows = table.getRowModel().rows.map(row => row.original);
+#crud.py
 
-      // Send visible data and selected radio option to backend
-      const response = await fetch(`${API_BASE_URL}/export/${tableKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          option: exportOption, // The radio button option selected
-          data: visibleRows     // The visible table data
+# Dashboard Version CRUD operations
+
+def get_dashboard_versions(
+    db: Session,
+    view_type: str,
+    user_id: str = 'default'
+) -> List[models.DashboardVersion]:
+    """Get all dashboard versions for a user and view type"""
+    return db.query(models.DashboardVersion).filter(
+        models.DashboardVersion.user_id == user_id,
+        models.DashboardVersion.view_type == view_type
+    ).order_by(models.DashboardVersion.name).all()
+
+
+def get_dashboard_version(
+    db: Session,
+    version_id: uuid.UUID
+) -> Optional[models.DashboardVersion]:
+    """Get a specific dashboard version by ID"""
+    return db.query(models.DashboardVersion).filter(
+        models.DashboardVersion.id == version_id
+    ).first()
+
+
+def create_dashboard_version(
+    db: Session,
+    version_data: schemas.DashboardVersionCreate,
+    user_id: str = 'default'
+) -> models.DashboardVersion:
+    """Create a new dashboard version"""
+    # Convert columns to list of dicts for JSONB storage
+    columns_json = [col.model_dump() for col in version_data.columns]
+
+    version = models.DashboardVersion(
+        user_id=user_id,
+        view_type=version_data.view_type,
+        name=version_data.name,
+        columns=columns_json
+    )
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+    return version
+
+
+def update_dashboard_version(
+    db: Session,
+    version_id: uuid.UUID,
+    version_data: schemas.DashboardVersionUpdate
+) -> Optional[models.DashboardVersion]:
+    """Update an existing dashboard version"""
+    version = db.query(models.DashboardVersion).filter(
+        models.DashboardVersion.id == version_id
+    ).first()
+
+    if not version:
+        return None
+
+    if version_data.name is not None:
+        version.name = version_data.name
+
+    if version_data.columns is not None:
+        version.columns = [col.model_dump() for col in version_data.columns]
+
+    db.commit()
+    db.refresh(version)
+    return version
+
+
+def delete_dashboard_version(
+    db: Session,
+    version_id: uuid.UUID
+) -> bool:
+    """Delete a dashboard version"""
+    version = db.query(models.DashboardVersion).filter(
+        models.DashboardVersion.id == version_id
+    ).first()
+
+    if not version:
+        return False
+
+    db.delete(version)
+    db.commit()
+    return True
+
+
+#main.py
+
+def generate_zip(files: dict[str, BytesIO]) -> BytesIO:
+    """
+    Generate a ZIP file containing multiple files
+    files: dict mapping filename -> BytesIO content
+    """
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for filename, content in files.items():
+            content.seek(0)
+            zip_file.writestr(filename, content.read())
+    zip_buffer.seek(0)
+    return zip_buffer
+
+
+# Dashboard Version API Endpoints
+
+@app.get("/api/versions/{view_type}")
+def get_versions(
+    view_type: str,
+    db: Session = Depends(get_db)
+):
+    """Get all saved versions for a view type (dashboard or users)"""
+    versions = crud.get_dashboard_versions(db, view_type)
+    # Convert columns from JSONB to ColumnConfig objects
+    result = []
+    for v in versions:
+        result.append({
+            "id": str(v.id),
+            "name": v.name,
+            "view_type": v.view_type,
+            "columns": v.columns,  # Already a list of dicts from JSONB
+            "created_at": v.created_at.isoformat(),
+            "updated_at": v.updated_at.isoformat()
         })
-      });
+    return {"versions": result}
 
-      if (!response.ok) throw new Error('Export failed');
 
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${tableKey}_export_${Date.now()}.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
+@app.post("/api/versions")
+def create_version(
+    request: schemas.DashboardVersionCreate,
+    db: Session = Depends(get_db)
+):
+    """Create a new saved version"""
+    try:
+        version = crud.create_dashboard_version(db, request)
+        return {
+            "id": str(version.id),
+            "name": version.name,
+            "view_type": version.view_type,
+            "columns": version.columns,
+            "created_at": version.created_at.isoformat(),
+            "updated_at": version.updated_at.isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-      alert('Export successful!');
-    } catch (error) {
-      console.error('Export error:', error);
-      alert('Export failed. Make sure the backend is running.');
-    } finally {
-      setLoading(false);
-    }
-  };
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-def generate_excel(data: List[dict], columns: List[str], table_key: str) -> BytesIO:
-    """
-    Generate an Excel file from the provided data
-    """
-    wb = Workbook()
-    ws = wb.active
-    ws.title = table_key.capitalize()
 
-    # Header styling
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_font = Font(bold=True, color="FFFFFF", size=12)
-    header_alignment = Alignment(horizontal="center", vertical="center")
+@app.put("/api/versions/{version_id}")
+def update_version(
+    version_id: str,
+    request: schemas.DashboardVersionUpdate,
+    db: Session = Depends(get_db)
+):
+    """Update an existing saved version"""
+    try:
+        from uuid import UUID
+        version = crud.update_dashboard_version(db, UUID(version_id), request)
+        if not version:
+            raise HTTPException(status_code=404, detail="Version not found")
+        return {
+            "id": str(version.id),
+            "name": version.name,
+            "view_type": version.view_type,
+            "columns": version.columns,
+            "created_at": version.created_at.isoformat(),
+            "updated_at": version.updated_at.isoformat()
+        }
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid version ID")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # Write headers
-    for col_idx, column in enumerate(columns, start=1):
-        cell = ws.cell(row=1, column=col_idx)
-        # Convert camelCase or snake_case to Title Case
-        # e.g., "lastLogin" -> "Last Login", "hire_date" -> "Hire Date"
-        import re
-        # Insert space before uppercase letters (camelCase) then title case
-        header_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', column)
-        header_text = header_text.replace('_', ' ').title()
-        cell.value = header_text
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = header_alignment
 
-    # Write data rows
-    for row_idx, row_data in enumerate(data, start=2):
-        for col_idx, column in enumerate(columns, start=1):
-            value = row_data.get(column, '')
-            ws.cell(row=row_idx, column=col_idx, value=str(value) if value is not None else '')
+@app.delete("/api/versions/{version_id}")
+def delete_version(
+    version_id: str,
+    db: Session = Depends(get_db)
+):
+    """Delete a saved version"""
+    try:
+        from uuid import UUID
+        success = crud.delete_dashboard_version(db, UUID(version_id))
+        if not success:
+            raise HTTPException(status_code=404, detail="Version not found")
+        return {"success": True}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid version ID")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # Auto-adjust column widths
-    for column in ws.columns:
-        max_length = 0
-        column_letter = column[0].column_letter
-        for cell in column:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        adjusted_width = min(max_length + 2, 50)  # Cap at 50
-        ws.column_dimensions[column_letter].width = adjusted_width
 
-    # Save to BytesIO
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output
 @app.post("/api/export/{table_key}")
 def export_data(
     table_key: str,
     request: schemas.ExportRequest
 ):
     """
-    Export visible table data to Excel with column filtering based on option
+    Export data to ZIP containing Excel file(s) with column filtering based on option
     """
     try:
-        # Filter columns based on the selected radio option
+        print(f"[EXPORT] Table: {table_key}, Option: {request.option}")
+        print(f"[EXPORT] Received {len(request.data)} rows")
+        if request.data:
+            print(f"[EXPORT] First row keys: {list(request.data[0].keys())}")
+
+        # Filter columns based on the selected option
         filtered_data, columns = filter_columns_by_option(
             request.data,
             request.option,
             table_key
         )
 
-        # Generate Excel file with styling
+        print(f"[EXPORT] After column filter: {len(filtered_data)} rows, {len(columns)} columns")
+        print(f"[EXPORT] Columns: {columns}")
+
+        # Generate Excel file
         excel_file = generate_excel(filtered_data, columns, table_key)
 
         # Generate filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{table_key}_export_{request.option}_{timestamp}.xlsx"
+        excel_filename = f"{table_key}_export_{request.option}_{timestamp}.xlsx"
 
-        # Return Excel file for download
+        # Create ZIP containing the Excel file
+        files_to_zip = {
+            excel_filename: excel_file
+        }
+        zip_file = generate_zip(files_to_zip)
+
+        zip_filename = f"{table_key}_export_{request.option}_{timestamp}.zip"
+
+        # Return as streaming response
         return StreamingResponse(
-            excel_file,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            zip_file,
+            media_type="application/zip",
             headers={
-                "Content-Disposition": f"attachment; filename={filename}"
+                "Content-Disposition": f"attachment; filename={zip_filename}"
             }
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+#models.py
+
+class DashboardVersion(Base):
+    __tablename__ = "dashboard_versions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String(255), nullable=False, default='default')
+    view_type = Column(String(50), nullable=False)  # 'dashboard' or 'users'
+    name = Column(String(100), nullable=False)
+    columns = Column(JSONB, nullable=False)  # Array of {id, visible} objects
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+#schemas.py
 
 
-
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
-from typing import List, Optional
-import os
-from dotenv import load_dotenv
-from io import BytesIO
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from datetime import datetime
-
-from . import models, schemas, crud
-from .database import engine, get_db
-def filter_columns_by_option(data: List[dict], option: str, table_key: str) -> tuple[List[dict], List[str]]:
-    """
-    Filter columns based on the export option selected
-    Returns: (filtered_data, column_headers)
-    """
-    # Define column sets for each option and table type
-    # NOTE: Use camelCase names to match the frontend data format
-    column_sets = {
-        'users': {
-            'all': ['id', 'username', 'email', 'role', 'status', 'active', 'lastLogin',
-                   'accountType', 'createdDate', 'department', 'country'],
-            'filtered': ['username', 'email', 'role', 'status', 'department'],  # Common fields
-            'selected': ['username', 'email', 'status', 'active']  # Minimal fields
-        },
-        'dashboard': {
-            'all': ['id', 'name', 'status', 'department', 'salary', 'hireDate',
-                   'location', 'manager', 'phone', 'employeeType'],
-            'filtered': ['name', 'department', 'status', 'salary', 'location'],  # Common fields
-            'selected': ['name', 'department', 'status']  # Minimal fields
-        }
-    }
-
-    # Get the columns for this table and option
-    columns = column_sets.get(table_key, {}).get(option, [])
-
-    # If no columns defined, return all
-    if not columns:
-        if data:
-            columns = list(data[0].keys())
-
-    # Filter each row to only include selected columns
-    filtered_data = []
-    for row in data:
-        filtered_row = {col: row.get(col, '') for col in columns}
-        filtered_data.append(filtered_row)
-
-    return filtered_data, columns
+class ExportRequest(BaseModel):
+    option: str  # 'all', 'filtered', 'selected'
+    data: List[dict]  # The visible table data from frontend
 
 
+# Dashboard Version Schemas
+class ColumnConfig(BaseModel):
+    id: str
+    visible: bool
+
+
+class DashboardVersionCreate(BaseModel):
+    name: str
+    view_type: str  # 'dashboard' or 'users'
+    columns: List[ColumnConfig]
+
+
+class DashboardVersionUpdate(BaseModel):
+    name: Optional[str] = None
+    columns: Optional[List[ColumnConfig]] = None
+
+
+class DashboardVersionResponse(BaseModel):
+    id: UUID
+    name: str
+    view_type: str
+    columns: List[ColumnConfig]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class DashboardVersionListResponse(BaseModel):
+    versions: List[DashboardVersionResponse]
+
+#app.tsx
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   useReactTable,
@@ -1528,4 +1644,251 @@ const App = () => {
   );
 };
 export default App;
+
+
+#index.css
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.5;
+    font-weight: 400;
+
+    /* Professional Slate Theme */
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    
+    /* Indigo Primary */
+    --primary: 226 70% 55.5%;
+    --primary-foreground: 210 40% 98%;
+    
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 226 70% 55.5%;
+    
+    --radius: 0.5rem;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: #f8fafc; /* Slate-50 */
+    color: hsl(var(--foreground));
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-white/80 backdrop-blur-sm border border-white/20 shadow-sm;
+  }
+}
+
+
+#select.tsx
+import * as React from "react"
+import * as SelectPrimitive from "@radix-ui/react-select"
+import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react"
+
+import { cn } from "@/lib/utils"
+
+function Select({
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Root>) {
+  return <SelectPrimitive.Root data-slot="select" {...props} />
+}
+
+function SelectGroup({
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Group>) {
+  return <SelectPrimitive.Group data-slot="select-group" {...props} />
+}
+
+function SelectValue({
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Value>) {
+  return <SelectPrimitive.Value data-slot="select-value" {...props} />
+}
+
+function SelectTrigger({
+  className,
+  size = "default",
+  children,
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Trigger> & {
+  size?: "sm" | "default"
+}) {
+  return (
+    <SelectPrimitive.Trigger
+      data-slot="select-trigger"
+      data-size={size}
+      className={cn(
+        "border-input data-[placeholder]:text-muted-foreground [&_svg:not([class*='text-'])]:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:bg-input/30 dark:hover:bg-input/50 flex w-full items-center justify-between gap-2 rounded-md border bg-transparent px-3 py-2 text-sm whitespace-nowrap shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 data-[size=default]:h-9 data-[size=sm]:h-8 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        className
+      )}
+      {...props}
+    >
+      {children}
+      <SelectPrimitive.Icon asChild>
+        <ChevronDownIcon className="size-4 opacity-50" />
+      </SelectPrimitive.Icon>
+    </SelectPrimitive.Trigger>
+  )
+}
+
+function SelectContent({
+  className,
+  children,
+  position = "popper",
+  align = "center",
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Content>) {
+  return (
+    <SelectPrimitive.Portal>
+      <SelectPrimitive.Content
+        data-slot="select-content"
+        className={cn(
+          "bg-white text-gray-900 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 relative z-50 max-h-(--radix-select-content-available-height) min-w-[8rem] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-md border border-gray-200 shadow-lg",
+          position === "popper" &&
+            "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
+          className
+        )}
+        position={position}
+        align={align}
+        {...props}
+      >
+        <SelectScrollUpButton />
+        <SelectPrimitive.Viewport
+          className={cn(
+            "p-1 bg-white",
+            position === "popper" &&
+              "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)] scroll-my-1"
+          )}
+        >
+          {children}
+        </SelectPrimitive.Viewport>
+        <SelectScrollDownButton />
+      </SelectPrimitive.Content>
+    </SelectPrimitive.Portal>
+  )
+}
+
+function SelectLabel({
+  className,
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Label>) {
+  return (
+    <SelectPrimitive.Label
+      data-slot="select-label"
+      className={cn("text-muted-foreground px-2 py-1.5 text-xs", className)}
+      {...props}
+    />
+  )
+}
+
+function SelectItem({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Item>) {
+  return (
+    <SelectPrimitive.Item
+      data-slot="select-item"
+      className={cn(
+        "focus:bg-accent focus:text-accent-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2 bg-white hover:bg-gray-100",
+        className
+      )}
+      {...props}
+    >
+      <span className="absolute right-2 flex size-3.5 items-center justify-center">
+        <SelectPrimitive.ItemIndicator>
+          <CheckIcon className="size-4" />
+        </SelectPrimitive.ItemIndicator>
+      </span>
+      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    </SelectPrimitive.Item>
+  )
+}
+
+function SelectSeparator({
+  className,
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.Separator>) {
+  return (
+    <SelectPrimitive.Separator
+      data-slot="select-separator"
+      className={cn("bg-border pointer-events-none -mx-1 my-1 h-px", className)}
+      {...props}
+    />
+  )
+}
+
+function SelectScrollUpButton({
+  className,
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.ScrollUpButton>) {
+  return (
+    <SelectPrimitive.ScrollUpButton
+      data-slot="select-scroll-up-button"
+      className={cn(
+        "flex cursor-default items-center justify-center py-1",
+        className
+      )}
+      {...props}
+    >
+      <ChevronUpIcon className="size-4" />
+    </SelectPrimitive.ScrollUpButton>
+  )
+}
+
+function SelectScrollDownButton({
+  className,
+  ...props
+}: React.ComponentProps<typeof SelectPrimitive.ScrollDownButton>) {
+  return (
+    <SelectPrimitive.ScrollDownButton
+      data-slot="select-scroll-down-button"
+      className={cn(
+        "flex cursor-default items-center justify-center py-1",
+        className
+      )}
+      {...props}
+    >
+      <ChevronDownIcon className="size-4" />
+    </SelectPrimitive.ScrollDownButton>
+  )
+}
+
+export {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectScrollDownButton,
+  SelectScrollUpButton,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+}
 
