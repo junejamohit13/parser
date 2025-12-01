@@ -1892,3 +1892,22 @@ export {
   SelectValue,
 }
 
+
+#init.sql
+CREATE TABLE dashboard_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL DEFAULT 'default',
+    view_type VARCHAR(50) NOT NULL,  -- 'dashboard' or 'users'
+    name VARCHAR(100) NOT NULL,
+    columns JSONB NOT NULL,  -- Array of {id, visible} objects, order = display order
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for fast lookups by user and view type
+CREATE INDEX idx_dashboard_versions_user_view ON dashboard_versions(user_id, view_type);
+
+-- Create trigger for dashboard_versions table
+CREATE TRIGGER update_dashboard_versions_updated_at BEFORE UPDATE ON dashboard_versions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
