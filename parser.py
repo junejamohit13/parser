@@ -1,297 +1,3 @@
-#crud.py
-
-# Dashboard Version CRUD operations
-
-def get_dashboard_versions(
-    db: Session,
-    view_type: str,
-    user_id: str = 'default'
-) -> List[models.DashboardVersion]:
-    """Get all dashboard versions for a user and view type"""
-    return db.query(models.DashboardVersion).filter(
-        models.DashboardVersion.user_id == user_id,
-        models.DashboardVersion.view_type == view_type
-    ).order_by(models.DashboardVersion.name).all()
-
-
-def get_dashboard_version(
-    db: Session,
-    version_id: uuid.UUID
-) -> Optional[models.DashboardVersion]:
-    """Get a specific dashboard version by ID"""
-    return db.query(models.DashboardVersion).filter(
-        models.DashboardVersion.id == version_id
-    ).first()
-
-
-def create_dashboard_version(
-    db: Session,
-    version_data: schemas.DashboardVersionCreate,
-    user_id: str = 'default'
-) -> models.DashboardVersion:
-    """Create a new dashboard version"""
-    # Convert columns to list of dicts for JSONB storage
-    columns_json = [col.model_dump() for col in version_data.columns]
-
-    version = models.DashboardVersion(
-        user_id=user_id,
-        view_type=version_data.view_type,
-        name=version_data.name,
-        columns=columns_json
-    )
-    db.add(version)
-    db.commit()
-    db.refresh(version)
-    return version
-
-
-def update_dashboard_version(
-    db: Session,
-    version_id: uuid.UUID,
-    version_data: schemas.DashboardVersionUpdate
-) -> Optional[models.DashboardVersion]:
-    """Update an existing dashboard version"""
-    version = db.query(models.DashboardVersion).filter(
-        models.DashboardVersion.id == version_id
-    ).first()
-
-    if not version:
-        return None
-
-    if version_data.name is not None:
-        version.name = version_data.name
-
-    if version_data.columns is not None:
-        version.columns = [col.model_dump() for col in version_data.columns]
-
-    db.commit()
-    db.refresh(version)
-    return version
-
-
-def delete_dashboard_version(
-    db: Session,
-    version_id: uuid.UUID
-) -> bool:
-    """Delete a dashboard version"""
-    version = db.query(models.DashboardVersion).filter(
-        models.DashboardVersion.id == version_id
-    ).first()
-
-    if not version:
-        return False
-
-    db.delete(version)
-    db.commit()
-    return True
-
-
-#main.py
-
-def generate_zip(files: dict[str, BytesIO]) -> BytesIO:
-    """
-    Generate a ZIP file containing multiple files
-    files: dict mapping filename -> BytesIO content
-    """
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for filename, content in files.items():
-            content.seek(0)
-            zip_file.writestr(filename, content.read())
-    zip_buffer.seek(0)
-    return zip_buffer
-
-
-# Dashboard Version API Endpoints
-
-@app.get("/api/versions/{view_type}")
-def get_versions(
-    view_type: str,
-    db: Session = Depends(get_db)
-):
-    """Get all saved versions for a view type (dashboard or users)"""
-    versions = crud.get_dashboard_versions(db, view_type)
-    # Convert columns from JSONB to ColumnConfig objects
-    result = []
-    for v in versions:
-        result.append({
-            "id": str(v.id),
-            "name": v.name,
-            "view_type": v.view_type,
-            "columns": v.columns,  # Already a list of dicts from JSONB
-            "created_at": v.created_at.isoformat(),
-            "updated_at": v.updated_at.isoformat()
-        })
-    return {"versions": result}
-
-
-@app.post("/api/versions")
-def create_version(
-    request: schemas.DashboardVersionCreate,
-    db: Session = Depends(get_db)
-):
-    """Create a new saved version"""
-    try:
-        version = crud.create_dashboard_version(db, request)
-        return {
-            "id": str(version.id),
-            "name": version.name,
-            "view_type": version.view_type,
-            "columns": version.columns,
-            "created_at": version.created_at.isoformat(),
-            "updated_at": version.updated_at.isoformat()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.put("/api/versions/{version_id}")
-def update_version(
-    version_id: str,
-    request: schemas.DashboardVersionUpdate,
-    db: Session = Depends(get_db)
-):
-    """Update an existing saved version"""
-    try:
-        from uuid import UUID
-        version = crud.update_dashboard_version(db, UUID(version_id), request)
-        if not version:
-            raise HTTPException(status_code=404, detail="Version not found")
-        return {
-            "id": str(version.id),
-            "name": version.name,
-            "view_type": version.view_type,
-            "columns": version.columns,
-            "created_at": version.created_at.isoformat(),
-            "updated_at": version.updated_at.isoformat()
-        }
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid version ID")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/versions/{version_id}")
-def delete_version(
-    version_id: str,
-    db: Session = Depends(get_db)
-):
-    """Delete a saved version"""
-    try:
-        from uuid import UUID
-        success = crud.delete_dashboard_version(db, UUID(version_id))
-        if not success:
-            raise HTTPException(status_code=404, detail="Version not found")
-        return {"success": True}
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid version ID")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/export/{table_key}")
-def export_data(
-    table_key: str,
-    request: schemas.ExportRequest
-):
-    """
-    Export data to ZIP containing Excel file(s) with column filtering based on option
-    """
-    try:
-        print(f"[EXPORT] Table: {table_key}, Option: {request.option}")
-        print(f"[EXPORT] Received {len(request.data)} rows")
-        if request.data:
-            print(f"[EXPORT] First row keys: {list(request.data[0].keys())}")
-
-        # Filter columns based on the selected option
-        filtered_data, columns = filter_columns_by_option(
-            request.data,
-            request.option,
-            table_key
-        )
-
-        print(f"[EXPORT] After column filter: {len(filtered_data)} rows, {len(columns)} columns")
-        print(f"[EXPORT] Columns: {columns}")
-
-        # Generate Excel file
-        excel_file = generate_excel(filtered_data, columns, table_key)
-
-        # Generate filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        excel_filename = f"{table_key}_export_{request.option}_{timestamp}.xlsx"
-
-        # Create ZIP containing the Excel file
-        files_to_zip = {
-            excel_filename: excel_file
-        }
-        zip_file = generate_zip(files_to_zip)
-
-        zip_filename = f"{table_key}_export_{request.option}_{timestamp}.zip"
-
-        # Return as streaming response
-        return StreamingResponse(
-            zip_file,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": f"attachment; filename={zip_filename}"
-            }
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
-#models.py
-
-class DashboardVersion(Base):
-    __tablename__ = "dashboard_versions"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(String(255), nullable=False, default='default')
-    view_type = Column(String(50), nullable=False)  # 'dashboard' or 'users'
-    name = Column(String(100), nullable=False)
-    columns = Column(JSONB, nullable=False)  # Array of {id, visible} objects
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-#schemas.py
-
-
-class ExportRequest(BaseModel):
-    option: str  # 'all', 'filtered', 'selected'
-    data: List[dict]  # The visible table data from frontend
-
-
-# Dashboard Version Schemas
-class ColumnConfig(BaseModel):
-    id: str
-    visible: bool
-
-
-class DashboardVersionCreate(BaseModel):
-    name: str
-    view_type: str  # 'dashboard' or 'users'
-    columns: List[ColumnConfig]
-
-
-class DashboardVersionUpdate(BaseModel):
-    name: Optional[str] = None
-    columns: Optional[List[ColumnConfig]] = None
-
-
-class DashboardVersionResponse(BaseModel):
-    id: UUID
-    name: str
-    view_type: str
-    columns: List[ColumnConfig]
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class DashboardVersionListResponse(BaseModel):
-    versions: List[DashboardVersionResponse]
-
-#app.tsx
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   useReactTable,
@@ -299,15 +5,47 @@ import {
   getFilteredRowModel,
   getSortedRowModel,
   flexRender,
-  createColumnHelper,
 } from '@tanstack/react-table';
+import type { ColumnFiltersState, SortingState, VisibilityState, ColumnDef, Column, Row as TRow } from '@tanstack/react-table';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { LayoutDashboard, Users, Settings, Filter, Download, X, Upload, Check, Loader2, Save, ArrowUpDown, Eye, EyeOff, Home, ChevronDown, Plus, Trash2, GripVertical } from 'lucide-react';
+import { LayoutDashboard, Users, Filter, Download, X, Upload, Check, Loader2, Save, ArrowUpDown, Eye, EyeOff, Home, ChevronDown, Plus, Trash2, GripVertical } from 'lucide-react';
 
 // API Configuration
 const API_BASE_URL = 'http://localhost:8000/api';
+
+// Types
+interface FilterParams {
+  departments?: string[];
+  statuses?: string[];
+}
+
+interface ColumnSchema {
+  name: string;
+  label: string;
+  type?: string;
+  editable?: boolean;
+  visible?: boolean;
+  options?: string[];
+}
+
+interface TableSchema {
+  columns: ColumnSchema[];
+}
+
+interface TableConfig {
+  schema: TableSchema | null;
+  data: Record<string, unknown>[];
+}
+
+interface DataTableProps {
+  tableKey: string;
+  config: TableConfig;
+  onDataChange: (tableKey: string, newData: Record<string, unknown>[]) => void;
+  onSave: (tableKey: string, records: Record<string, unknown>[]) => void;
+}
 
 // API Functions
 const api = {
@@ -325,7 +63,7 @@ const api = {
     return await response.json();
   },
 
-  dashboard: async (filters = {}) => {
+  dashboard: async (filters: FilterParams = {}) => {
     const params = new URLSearchParams();
     if (filters.departments && filters.departments.length > 0) {
       params.append('departments', filters.departments.join(','));
@@ -340,7 +78,7 @@ const api = {
     return await response.json();
   },
 
-  users: async (filters = {}) => {
+  users: async (filters: FilterParams = {}) => {
     const params = new URLSearchParams();
     if (filters.departments && filters.departments.length > 0) {
       params.append('departments', filters.departments.join(','));
@@ -355,7 +93,7 @@ const api = {
     return await response.json();
   },
 
-  saveDashboard: async (data) => {
+  saveDashboard: async (data: Record<string, unknown>[]) => {
     const response = await fetch(`${API_BASE_URL}/dashboard/save`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -365,7 +103,7 @@ const api = {
     return await response.json();
   },
 
-  saveUsers: async (data) => {
+  saveUsers: async (data: Record<string, unknown>[]) => {
     const response = await fetch(`${API_BASE_URL}/users/save`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -426,23 +164,24 @@ interface SavedVersion {
   updated_at: string;
 }
 
-const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
-  const [data, setData] = useState(config?.data || []);
-  const modifiedRecordIdsRef = useRef(new Set());
+const DataTable = ({ tableKey, config, onDataChange: _onDataChange, onSave }: DataTableProps) => {
+  void _onDataChange; // Mark as intentionally unused
+  const [data, setData] = useState<Record<string, unknown>[]>(config?.data || []);
+  const modifiedRecordIdsRef = useRef(new Set<number | string>());
   const [, forceUpdate] = useState({});
-  const [columnVisibility, setColumnVisibility] = useState({});
-  const [columnFilters, setColumnFilters] = useState([]);
-  const [sorting, setSorting] = useState([]);
-  const [columnOrder, setColumnOrder] = useState<string[]>([]);//version management
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
   const [showColumnSelector, setShowColumnSelector] = useState(false);
   const [exportOption, setExportOption] = useState('all');
   const [loading, setLoading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState(null);
-  const [dragEnd, setDragEnd] = useState(null);
-  const [dragColumn, setDragColumn] = useState(null);
-  const [draggedColumn, setDraggedColumn] = useState<string | null>(null);//version
-  const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);//version
+  const [dragStart, setDragStart] = useState<string | null>(null);
+  const [dragEnd, setDragEnd] = useState<string | null>(null);
+  const [dragColumn, setDragColumn] = useState<string | null>(null);
+  const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
+  const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
 
   // Version management state
   const [savedVersions, setSavedVersions] = useState<SavedVersion[]>([]);
@@ -455,6 +194,9 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
   // Column panel drag state
   const [panelDraggedColumn, setPanelDraggedColumn] = useState<string | null>(null);
   const [panelDragOverColumn, setPanelDragOverColumn] = useState<string | null>(null);
+
+  // Virtual scrolling ref
+  const tableContainerRef = useRef<HTMLDivElement>(null);
 //end 
   useEffect(() => {
     if (config?.data) {
@@ -462,16 +204,16 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
       modifiedRecordIdsRef.current = new Set(); // Reset modified records when new data loads
       console.log('[RESET] Modified IDs cleared on new data load');
       // Set initial visibility from schema
-      const initialVisibility = {};
-      config.schema?.columns?.forEach(col => {
+      const initialVisibility: VisibilityState = {};
+      config.schema?.columns?.forEach((col: ColumnSchema) => {
         if (col.visible === false) {
           initialVisibility[col.name] = false;
         }
       });
       setColumnVisibility(initialVisibility);
-      // Set initial column order from schema //version
+      // Set initial column order from schema
       if (config.schema?.columns) {
-        setColumnOrder(config.schema.columns.map(col => col.name));
+        setColumnOrder(config.schema.columns.map((col: ColumnSchema) => col.name));
       }
     }//version
   }, [config]);
@@ -577,14 +319,14 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
 
   const resetToDefault = () => {
     // Reset to schema defaults
-    const initialVisibility = {};
-    config.schema?.columns?.forEach(col => {
+    const initialVisibility: VisibilityState = {};
+    config.schema?.columns?.forEach((col: ColumnSchema) => {
       if (col.visible === false) {
         initialVisibility[col.name] = false;
       }
     });
     setColumnVisibility(initialVisibility);
-    setColumnOrder(config.schema?.columns?.map(col => col.name) || []);
+    setColumnOrder(config.schema?.columns?.map((col: ColumnSchema) => col.name) || []);
     setSelectedVersionId(null);
     setShowVersionDropdown(false);
   };
@@ -644,7 +386,7 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
       }
     };
 
-    const handleMouseMove = (e) => {
+    const handleMouseMove = (e: MouseEvent) => {
       if (isDragging) {
         // Find the cell element under the cursor
         const element = document.elementFromPoint(e.clientX, e.clientY);
@@ -668,7 +410,7 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
     };
   }, [isDragging, dragStart, dragEnd, dragColumn, data]);
 
-  const updateData = (rowIndex, columnId, value) => {
+  const updateData = (rowIndex: number, columnId: string, value: unknown) => {
     console.log(`[UPDATE DATA] Row Index: ${rowIndex}, Column: ${columnId}, Value: ${value}`);
     const newData = data.map((row, index) => {
       if (index === rowIndex) {
@@ -676,7 +418,7 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
         console.log(`[ROW ID]`, row.id, 'Type:', typeof row.id);
 
         // Mark this record as modified
-        modifiedRecordIdsRef.current.add(row.id);
+        modifiedRecordIdsRef.current.add(row.id as string | number);
         console.log(`[MODIFIED] Record ID: ${row.id}, Field: ${columnId}, New Value: ${value}`);
         console.log('[MODIFIED SET UPDATED]', Array.from(modifiedRecordIdsRef.current));
         forceUpdate({}); // Force re-render to update Save button
@@ -689,14 +431,15 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
     // onDataChange(tableKey, newData);
   };
 
-  const handleDragStart = (rowId, columnId, value) => {
+  const handleDragStart = (rowId: string, columnId: string, _value: unknown) => {
+    void _value; // Mark as intentionally unused
     setIsDragging(true);
     setDragStart(rowId);
     setDragEnd(rowId);
     setDragColumn(columnId);
   };
 
-  const handleDragOver = (rowId) => {
+  const handleDragOver = (rowId: string) => {
     if (isDragging) {
       setDragEnd(rowId);
     }
@@ -734,7 +477,7 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
         const shouldUpdate = rowsToUpdate.some(r => r.original === row);
         if (shouldUpdate && row !== startRowData) {
           // Mark this record as modified
-          modifiedRecordIdsRef.current.add(row.id);
+          modifiedRecordIdsRef.current.add(row.id as string | number);
           console.log('[DRAG MODIFIED]', row.id);
           return { ...row, [dragColumn]: fillValue };
         }
@@ -754,13 +497,13 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
     setDragColumn(null);
   };
 
-  const columns = useMemo(() => {
+  const columns = useMemo((): ColumnDef<Record<string, unknown>>[] => {
     if (!config?.schema) return [];
 
-    return config.schema.columns.map(col => {
-      const columnDef = {
+    return config.schema.columns.map((col: ColumnSchema): ColumnDef<Record<string, unknown>> => {
+      const columnDef: ColumnDef<Record<string, unknown>> = {
         accessorKey: col.name,
-        header: ({ column }) => (
+        header: ({ column }: { column: Column<Record<string, unknown>> }) => (
           <div className="flex items-center gap-2">
             <span className="font-semibold text-xs uppercase tracking-wider text-gray-500">{col.label}</span>
             {col.editable && (
@@ -775,8 +518,8 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
             )}
           </div>
         ),
-        cell: ({ row, column }) => {
-          const value = row.getValue(column.id);
+        cell: ({ row, column }: { row: TRow<Record<string, unknown>>; column: Column<Record<string, unknown>> }) => {
+          const value = row.getValue(column.id) as string;
           const rowId = row.id;
 
           // Check if this row is in the drag range
@@ -847,12 +590,12 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
             </div>
           );
         },
-        filterFn: 'includesString',
+        filterFn: 'includesString' as const,
       };
 
       return columnDef;
     });
-  }, [config, data]);
+  }, [config, data, dragStart, dragEnd, dragColumn, isDragging]);
 
   const table = useReactTable({
     data,
@@ -870,6 +613,17 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getSortedRowModel: getSortedRowModel(),
+  });
+
+  // Get filtered/sorted rows for virtualization
+  const { rows } = table.getRowModel();
+
+  // Virtual row setup
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => tableContainerRef.current,
+    estimateSize: () => 45, // Estimated row height in pixels
+    overscan: 10, // Number of rows to render outside visible area
   });
 
   const handleExport = async () => {
@@ -1098,7 +852,7 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
                 </div>
                 <div className="space-y-0.5 max-h-[400px] overflow-y-auto custom-scrollbar">
                   {table.getAllLeafColumns().map(column => {
-                    const colConfig = config.schema.columns.find(c => c.name === column.id);
+                    const colConfig = config.schema?.columns.find((c: ColumnSchema) => c.name === column.id);
                     const isDragging = panelDraggedColumn === column.id;
                     const isDropTarget = panelDragOverColumn === column.id;
                     return (
@@ -1142,7 +896,7 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
           </div>
           <Button
             onClick={() => {
-              const modifiedRecords = data.filter(record => modifiedRecordIdsRef.current.has(record.id));
+              const modifiedRecords = data.filter(record => modifiedRecordIdsRef.current.has(record.id as string | number));
               const recordsToSave = modifiedRecords.length > 0 ? modifiedRecords : data;
               onSave(tableKey, recordsToSave);
               modifiedRecordIdsRef.current = new Set();
@@ -1156,11 +910,12 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
         </div>
       </div>
 
-      {/* Table */}
+      {/* Table with Virtual Scrolling */}
       <div className="border border-gray-200 rounded-lg bg-white shadow-sm overflow-hidden">
-        <div className="overflow-x-auto overflow-y-auto max-h-[600px]">
+        {/* Fixed Header */}
+        <div className="overflow-x-auto">
           <table className="w-full text-sm text-left">
-            <thead className="bg-gray-50/50 border-b border-gray-200 sticky top-0 z-10 backdrop-blur-sm">
+            <thead className="bg-gray-50/50 border-b border-gray-200">
               {table.getHeaderGroups().map(headerGroup => (
                 <React.Fragment key={headerGroup.id}>
                   <tr>
@@ -1186,10 +941,10 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
                   </tr>
                   <tr>
                     {headerGroup.headers.map(header => {
-                      const colConfig = config.schema.columns.find(c => c.name === header.column.id);
+                      const colConfig = config.schema?.columns.find((c: ColumnSchema) => c.name === header.column.id);
                       return (
                         <th key={header.id} className="px-4 py-2 bg-gray-50">
-                          {colConfig?.editable && colConfig.type === 'select' ? (
+                          {colConfig?.type === 'select' && colConfig.options ? (
                             <Select
                               value={(header.column.getFilterValue() ?? '__all__') as string}
                               onValueChange={(value) => header.column.setFilterValue(value === '__all__' ? undefined : value)}
@@ -1199,19 +954,19 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
                               </SelectTrigger>
                               <SelectContent className="bg-white">
                                 <SelectItem value="__all__">All</SelectItem>
-                                {colConfig.options?.map(option => (
+                                {colConfig.options?.map((option: string) => (
                                   <SelectItem key={option} value={option}>{option}</SelectItem>
                                 ))}
                               </SelectContent>
                             </Select>
-                          ) : colConfig?.editable ? (
+                          ) : (
                             <Input
                               placeholder="Filter..."
                               value={(header.column.getFilterValue() ?? '') as string}
                               onChange={(e) => header.column.setFilterValue(e.target.value)}
                               className="h-8 text-xs"
                             />
-                          ) : null}
+                          )}
                         </th>
                       );
                     })}
@@ -1219,19 +974,56 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
                 </React.Fragment>
               ))}
             </thead>
-            <tbody className="divide-y divide-gray-100 bg-white">
-              {table.getRowModel().rows.map(row => (
-                <tr key={row.id} className="hover:bg-gray-50/80 transition-colors group">
-                  {row.getVisibleCells().map(cell => (
-                    <td key={cell.id} className="px-4 py-2.5 border-r border-transparent group-hover:border-gray-100 last:border-r-0" data-row-id={row.id}>
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
           </table>
         </div>
+
+        {/* Virtualized Body */}
+        <div
+          ref={tableContainerRef}
+          className="overflow-auto max-h-[500px]"
+        >
+          <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: 'relative' }}>
+            <table className="w-full text-sm text-left">
+              <tbody>
+                {rowVirtualizer.getVirtualItems().map(virtualRow => {
+                  const row = rows[virtualRow.index];
+                  return (
+                    <tr
+                      key={row.id}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        height: `${virtualRow.size}px`,
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
+                      className="hover:bg-gray-50/80 transition-colors group flex"
+                    >
+                      {row.getVisibleCells().map(cell => (
+                        <td
+                          key={cell.id}
+                          className="px-4 py-2.5 border-r border-transparent group-hover:border-gray-100 last:border-r-0 min-w-[150px] flex-1"
+                          data-row-id={row.id}
+                        >
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {/* Row count info */}
+      <div className="flex items-center justify-between bg-white px-4 py-2 rounded-lg border border-gray-200 shadow-sm text-sm text-gray-600">
+        <span>
+          Showing {rows.length} of {data.length} records
+          {rows.length !== data.length && ' (filtered)'}
+        </span>
       </div>
 
       {/* Export Section for Users Table */}
@@ -1284,15 +1076,15 @@ const DataTable = ({ tableKey, config, onDataChange, onSave }) => {
 const App = () => {
   const [activeScreen, setActiveScreen] = useState('home');
   const [loading, setLoading] = useState(false);
-  const [tableConfig, setTableConfig] = useState({
+  const [tableConfig, setTableConfig] = useState<Record<string, TableConfig>>({
     dashboard: { schema: null, data: [] },
     users: { schema: null, data: [] }
   });
-  const [availableDepartments, setAvailableDepartments] = useState([]);
-  const [selectedDepartments, setSelectedDepartments] = useState([]);
+  const [availableDepartments, setAvailableDepartments] = useState<string[]>([]);
+  const [selectedDepartments, setSelectedDepartments] = useState<string[]>([]);
   const [showDepartmentDropdown, setShowDepartmentDropdown] = useState(false);
-  const [availableStatuses, setAvailableStatuses] = useState([]);
-  const [selectedStatuses, setSelectedStatuses] = useState([]);
+  const [availableStatuses, setAvailableStatuses] = useState<string[]>([]);
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
 
   const menuItems = [
@@ -1359,7 +1151,7 @@ const App = () => {
     }
   };
 
-  const handleDataChange = (tableKey, newData) => {
+  const handleDataChange = (tableKey: string, newData: Record<string, unknown>[]) => {
     setTableConfig(prev => ({
       ...prev,
       [tableKey]: {
@@ -1369,7 +1161,7 @@ const App = () => {
     }));
   };
 
-  const handleSave = async (tableKey, modifiedRecords) => {
+  const handleSave = async (tableKey: string, modifiedRecords: Record<string, unknown>[]) => {
     setLoading(true);
     console.log('=== HANDLE SAVE ===');
     console.log('Table:', tableKey);
@@ -1405,13 +1197,13 @@ const App = () => {
     }
   };
 
-  const toggleDepartment = (department) => {
+  const toggleDepartment = (department: string) => {
     setSelectedDepartments(prev =>
       prev.includes(department) ? prev.filter(d => d !== department) : [...prev, department]
     );
   };
 
-  const toggleStatus = (status) => {
+  const toggleStatus = (status: string) => {
     setSelectedStatuses(prev =>
       prev.includes(status) ? prev.filter(s => s !== status) : [...prev, status]
     );
@@ -1424,11 +1216,11 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (showDepartmentDropdown && !event.target.closest('.department-dropdown')) {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (showDepartmentDropdown && !(event.target as Element).closest('.department-dropdown')) {
         setShowDepartmentDropdown(false);
       }
-      if (showStatusDropdown && !event.target.closest('.status-dropdown')) {
+      if (showStatusDropdown && !(event.target as Element).closest('.status-dropdown')) {
         setShowStatusDropdown(false);
       }
     };
@@ -1644,270 +1436,114 @@ const App = () => {
   );
 };
 export default App;
+⏺ Here's a summary of the virtual scrolling changes:
 
+  Virtual Scrolling Implementation
 
-#index.css
-@import "tailwindcss";
+  1. New Import
 
-@layer base {
-  :root {
-    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    line-height: 1.5;
-    font-weight: 400;
+  import { useVirtualizer } from '@tanstack/react-virtual';
 
-    /* Professional Slate Theme */
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    
-    /* Indigo Primary */
-    --primary: 226 70% 55.5%;
-    --primary-foreground: 210 40% 98%;
-    
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 226 70% 55.5%;
-    
-    --radius: 0.5rem;
-  }
+  2. Added Ref for Scroll Container (line 197)
 
-  body {
-    margin: 0;
-    min-height: 100vh;
-    background-color: #f8fafc; /* Slate-50 */
-    color: hsl(var(--foreground));
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-  }
-}
+  const tableContainerRef = useRef<HTMLDivElement>(null);
 
-@layer utilities {
-  .glass-panel {
-    @apply bg-white/80 backdrop-blur-sm border border-white/20 shadow-sm;
-  }
-}
+  3. Virtualizer Setup (lines 618-627)
 
+  // Get filtered/sorted rows for virtualization
+  const { rows } = table.getRowModel();
 
-#select.tsx
-import * as React from "react"
-import * as SelectPrimitive from "@radix-ui/react-select"
-import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react"
+  // Virtual row setup
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => tableContainerRef.current,
+    estimateSize: () => 45,  // Estimated row height in pixels
+    overscan: 10,            // Extra rows to render outside viewport
+  });
 
-import { cn } from "@/lib/utils"
+  4. Split Table Structure
 
-function Select({
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Root>) {
-  return <SelectPrimitive.Root data-slot="select" {...props} />
-}
+  - Fixed Header - Stays at top while scrolling
+  - Virtualized Body - Only renders visible rows
 
-function SelectGroup({
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Group>) {
-  return <SelectPrimitive.Group data-slot="select-group" {...props} />
-}
+  5. Body Rendering (lines 980-1017)
 
-function SelectValue({
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Value>) {
-  return <SelectPrimitive.Value data-slot="select-value" {...props} />
-}
+  <div
+    ref={tableContainerRef}
+    className="overflow-auto max-h-[500px]"
+  >
+    <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: 'relative' }}>
+      <table>
+        <tbody>
+          {rowVirtualizer.getVirtualItems().map(virtualRow => {
+            const row = rows[virtualRow.index];
+            return (
+              <tr
+                style={{
+                  position: 'absolute',
+                  transform: `translateY(${virtualRow.start}px)`,
+                  height: `${virtualRow.size}px`,
+                }}
+              >
+                {/* cells */}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  </div>
 
-function SelectTrigger({
-  className,
-  size = "default",
-  children,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Trigger> & {
-  size?: "sm" | "default"
-}) {
-  return (
-    <SelectPrimitive.Trigger
-      data-slot="select-trigger"
-      data-size={size}
-      className={cn(
-        "border-input data-[placeholder]:text-muted-foreground [&_svg:not([class*='text-'])]:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:bg-input/30 dark:hover:bg-input/50 flex w-full items-center justify-between gap-2 rounded-md border bg-transparent px-3 py-2 text-sm whitespace-nowrap shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 data-[size=default]:h-9 data-[size=sm]:h-8 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-2 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
-        className
-      )}
-      {...props}
-    >
-      {children}
-      <SelectPrimitive.Icon asChild>
-        <ChevronDownIcon className="size-4 opacity-50" />
-      </SelectPrimitive.Icon>
-    </SelectPrimitive.Trigger>
-  )
-}
+  Key Benefits:
 
-function SelectContent({
-  className,
-  children,
-  position = "popper",
-  align = "center",
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Content>) {
-  return (
-    <SelectPrimitive.Portal>
-      <SelectPrimitive.Content
-        data-slot="select-content"
-        className={cn(
-          "bg-white text-gray-900 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 relative z-50 max-h-(--radix-select-content-available-height) min-w-[8rem] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-md border border-gray-200 shadow-lg",
-          position === "popper" &&
-            "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
-          className
-        )}
-        position={position}
-        align={align}
-        {...props}
-      >
-        <SelectScrollUpButton />
-        <SelectPrimitive.Viewport
-          className={cn(
-            "p-1 bg-white",
-            position === "popper" &&
-              "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)] scroll-my-1"
-          )}
-        >
-          {children}
-        </SelectPrimitive.Viewport>
-        <SelectScrollDownButton />
-      </SelectPrimitive.Content>
-    </SelectPrimitive.Portal>
-  )
-}
+  - Performance - Only ~20-30 rows rendered at once instead of thousands
+  - Smooth scrolling - overscan: 10 pre-renders rows for seamless scrolling
+  - Filtering works across all data - Filters apply to full dataset, virtualization only affects rendering
+  - Memory efficient - DOM contains minimal elements regardless of data size
 
-function SelectLabel({
-  className,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Label>) {
-  return (
-    <SelectPrimitive.Label
-      data-slot="select-label"
-      className={cn("text-muted-foreground px-2 py-1.5 text-xs", className)}
-      {...props}
-    />
-  )
-}
+> Split Table Structure
 
-function SelectItem({
-  className,
-  children,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Item>) {
-  return (
-    <SelectPrimitive.Item
-      data-slot="select-item"
-      className={cn(
-        "focus:bg-accent focus:text-accent-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2 bg-white hover:bg-gray-100",
-        className
-      )}
-      {...props}
-    >
-      <span className="absolute right-2 flex size-3.5 items-center justify-center">
-        <SelectPrimitive.ItemIndicator>
-          <CheckIcon className="size-4" />
-        </SelectPrimitive.ItemIndicator>
-      </span>
-      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
-    </SelectPrimitive.Item>
-  )
-}
+  - Fixed Header - Stays at top while scrolling
+  - Virtualized Body - Only renders visible rows -> What roe were cha nged for it 
 
-function SelectSeparator({
-  className,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.Separator>) {
-  return (
-    <SelectPrimitive.Separator
-      data-slot="select-separator"
-      className={cn("bg-border pointer-events-none -mx-1 my-1 h-px", className)}
-      {...props}
-    />
-  )
-}
+⏺ The table structure was changed from a single <table> to a split structure. Here's the specific change:
 
-function SelectScrollUpButton({
-  className,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.ScrollUpButton>) {
-  return (
-    <SelectPrimitive.ScrollUpButton
-      data-slot="select-scroll-up-button"
-      className={cn(
-        "flex cursor-default items-center justify-center py-1",
-        className
-      )}
-      {...props}
-    >
-      <ChevronUpIcon className="size-4" />
-    </SelectPrimitive.ScrollUpButton>
-  )
-}
+  Before (Single Table)
 
-function SelectScrollDownButton({
-  className,
-  ...props
-}: React.ComponentProps<typeof SelectPrimitive.ScrollDownButton>) {
-  return (
-    <SelectPrimitive.ScrollDownButton
-      data-slot="select-scroll-down-button"
-      className={cn(
-        "flex cursor-default items-center justify-center py-1",
-        className
-      )}
-      {...props}
-    >
-      <ChevronDownIcon className="size-4" />
-    </SelectPrimitive.ScrollDownButton>
-  )
-}
+  <div className="overflow-x-auto overflow-y-auto max-h-[600px]">
+    <table>
+      <thead className="sticky top-0">
+        {/* headers */}
+      </thead>
+      <tbody>
+        {table.getRowModel().rows.map(row => (
+          <tr>{/* cells */}</tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
 
-export {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectScrollDownButton,
-  SelectScrollUpButton,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
-}
+  After (Split Structure) - Lines 913-1025
 
+  Fixed Header Section (lines 913-977):
+  <div className="overflow-x-auto">
+    <table>
+      <thead>
+        {/* Header rows - NOT inside scrollable container */}
+      </thead>
+    </table>
+  </div>
 
-#init.sql
-CREATE TABLE dashboard_versions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id VARCHAR(255) NOT NULL DEFAULT 'default',
-    view_type VARCHAR(50) NOT NULL,  -- 'dashboard' or 'users'
-    name VARCHAR(100) NOT NULL,
-    columns JSONB NOT NULL,  -- Array of {id, visible} objects, order = display order
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Index for fast lookups by user and view type
-CREATE INDEX idx_dashboard_versions_user_view ON dashboard_versions(user_id, view_type);
-
--- Create trigger for dashboard_versions table
-CREATE TRIGGER update_dashboard_versions_updated_at BEFORE UPDATE ON dashboard_versions
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
-
+  Virtualized Body Section (lines 980-1017):
+  <div
+    ref={tableContainerRef}
+    className="overflow-auto max-h-[500px]"  {/* Only body scrolls */}
+  >
+    <div style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
+      <table>
+        <tbody>
+          {rowVirtualizer.getVirtualItems().map(virtualRow => ...)}
+        </tbody>
+      </table>
+    </div>
+  </div>
