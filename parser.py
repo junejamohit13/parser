@@ -70,6 +70,7 @@ export function useAuth() {
 }
 
 #secure/auth/SecureRoute.tsx
+import { useEffect } from 'react';
 import { useOktaAuth } from '@okta/okta-react';
 import { Loader2 } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -79,8 +80,16 @@ interface SecureRouteProps {
 }
 
 export function SecureRoute({ children }: SecureRouteProps) {
-  const { authState } = useOktaAuth();
+  const { authState, oktaAuth } = useOktaAuth();
 
+  useEffect(() => {
+    // If not authenticated and auth state is loaded, redirect to Okta login
+    if (authState && !authState.isAuthenticated) {
+      oktaAuth.signInWithRedirect();
+    }
+  }, [authState, oktaAuth]);
+
+  // Still loading auth state
   if (!authState) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gray-50">
@@ -94,6 +103,7 @@ export function SecureRoute({ children }: SecureRouteProps) {
     );
   }
 
+  // Not authenticated - show redirecting message while oktaAuth.signInWithRedirect() happens
   if (!authState.isAuthenticated) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-gray-50">
@@ -107,8 +117,10 @@ export function SecureRoute({ children }: SecureRouteProps) {
     );
   }
 
+  // Authenticated - render children
   return <>{children}</>;
 }
+
 
 #src/auth/LoginCallback.tsx
 import { useEffect } from 'react';
