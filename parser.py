@@ -1,387 +1,414 @@
-getStatusesByDepartments: async (departments: string[]): Promise<{ statuses: string[] }> => {            
-    const params = new URLSearchParams();                                                                  
-    if (departments.length > 0) {                                                                          
-      params.append('departments', departments.join(','));                                                 
-    }                                                                                                      
-    const url = `${API_BASE_URL}/statuses${params.toString() ? '?' + params.toString() : ''}`;             
-    const response = await fetch(url);                                                                     
-    if (!response.ok) throw new Error('Failed to fetch statuses');                                         
-    return await response.json();                                                                          
-  },    
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+from typing import List, Optional
+import os
+import zipfile
+from dotenv import load_dotenv
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from datetime import datetime
+import re
 
-  const [loadingStatuses, setLoadingStatuses] = useState(false);        
+from . import models, schemas, crud
+from .database import engine, get_db
 
-useEffect(() => {                                                                                        
-    const loadStatuses = async () => {                                                                     
-      setLoadingStatuses(true);                                                                            
-      try {                                                                                                
-        const statusResponse = await api.getStatusesByDepartments(selectedDepartments);                    
-        setAvailableStatuses(statusResponse.statuses);                                                     
-                                                                                                           
-        // Clear selected statuses that are no longer available                                            
-        if (selectedDepartments.length > 0) {                                                              
-          setSelectedStatuses(prev =>                                                                      
-            prev.filter(status => statusResponse.statuses.includes(status))                                
-          );                                                                                               
-        }                                                                                                  
-      } catch (error) {                                                                                    
-        console.error('Failed to load statuses:', error);                                                  
-      } finally {                                                                                          
-        setLoadingStatuses(false);                                                                         
-      }                                                                                                    
-    };                                                                                                     
-    loadStatuses();                                                                                        
-  }, [selectedDepartments]); // <-- Re-runs when departments change                                        
-                       
+load_dotenv()
 
-import React, { useState, useEffect, useRef } from 'react';
-import { Home, LayoutDashboard, Users, Filter, Upload, Loader2, Check, ChevronDown, X } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { toast } from 'sonner';
-import { api } from '@/lib/api';
+# Create tables
+models.Base.metadata.create_all(bind=engine)
 
-interface MenuItem {
-  id: string;
-  label: string;
-  icon: React.ElementType;
-}
+app = FastAPI(title="Data Manager API", version="1.0.0")
 
-interface SidebarProps {
-  activeScreen: string;
-  onScreenChange: (screen: string) => void;
-  onLoadData: (departments: string[], statuses: string[]) => Promise<void>;
-  loading: boolean;
-}
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-const menuItems: MenuItem[] = [
-  { id: 'home', label: 'Home', icon: Home },
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'users', label: 'Users', icon: Users }
-];
 
-export function Sidebar({ activeScreen, onScreenChange, onLoadData, loading }: SidebarProps) {
-  const [availableDepartments, setAvailableDepartments] = useState<string[]>([]);
-  const [selectedDepartments, setSelectedDepartments] = useState<string[]>([]);
-  const [showDepartmentDropdown, setShowDepartmentDropdown] = useState(false);
+# Helper function to build schema response
+def build_schema(view_type: str) -> schemas.TableSchema:
+    """Build schema based on view type (dashboard or users)"""
+    if view_type == "dashboard":
+        return schemas.TableSchema(
+            columns=[
+                schemas.ColumnSchema(name='id', label='ID', type='text', editable=False, visible=False),
+                schemas.ColumnSchema(name='name', label='Full Name', type='text', editable=True, visible=True),
+                schemas.ColumnSchema(name='status', label='Status', type='select', editable=True, visible=True, options=['Active', 'Inactive', 'Pending']),
+                schemas.ColumnSchema(name='department', label='Department', type='select', editable=True, visible=True, options=['Sales', 'Marketing', 'IT', 'HR', 'Finance', 'Operations', 'Legal']),
+                schemas.ColumnSchema(name='salary', label='Salary', type='text', editable=True, visible=True),
+                schemas.ColumnSchema(name='hire_date', label='Hire Date', type='text', editable=True, visible=False),
+                schemas.ColumnSchema(name='location', label='Office Location', type='select', editable=True, visible=True, options=['New York', 'San Francisco', 'London', 'Tokyo', 'Remote']),
+                schemas.ColumnSchema(name='manager', label='Manager', type='text', editable=True, visible=False),
+                schemas.ColumnSchema(name='phone', label='Phone', type='text', editable=True, visible=False),
+                schemas.ColumnSchema(name='employee_type', label='Employment Type', type='select', editable=True, visible=True, options=['Full-Time', 'Part-Time', 'Contract', 'Intern'])
+            ]
+        )
+    else:  # users
+        return schemas.TableSchema(
+            columns=[
+                schemas.ColumnSchema(name='id', label='ID', type='text', editable=False, visible=False),
+                schemas.ColumnSchema(name='username', label='Username', type='text', editable=True, visible=True),
+                schemas.ColumnSchema(name='email', label='Email Address', type='text', editable=True, visible=True),
+                schemas.ColumnSchema(name='role', label='Role', type='select', editable=True, visible=True, options=['Admin', 'Manager', 'User', 'Guest']),
+                schemas.ColumnSchema(name='status', label='Status', type='select', editable=True, visible=True, options=['Active', 'Inactive', 'Pending']),
+                schemas.ColumnSchema(name='active', label='Active', type='select', editable=True, visible=True, options=['Yes', 'No']),
+                schemas.ColumnSchema(name='last_login', label='Last Login', type='text', editable=True, visible=False),
+                schemas.ColumnSchema(name='account_type', label='Account Type', type='select', editable=True, visible=True, options=['Premium', 'Standard', 'Trial', 'Enterprise']),
+                schemas.ColumnSchema(name='created_date', label='Created Date', type='text', editable=True, visible=False),
+                schemas.ColumnSchema(name='department', label='Department', type='select', editable=True, visible=True, options=['Engineering', 'Sales', 'Marketing', 'Support', 'Admin']),
+                schemas.ColumnSchema(name='country', label='Country', type='select', editable=True, visible=False, options=['USA', 'UK', 'Canada', 'Germany', 'Japan', 'Australia'])
+            ]
+        )
 
-  const [availableStatuses, setAvailableStatuses] = useState<string[]>([]);
-  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
-  const [showStatusDropdown, setShowStatusDropdown] = useState(false);
-  const [loadingStatuses, setLoadingStatuses] = useState(false);
 
-  const departmentRef = useRef<HTMLDivElement>(null);
-  const statusRef = useRef<HTMLDivElement>(null);
+def record_to_dict(record: models.Record, view_type: str) -> dict:
+    """Convert record to dict based on view type"""
+    base_dict = {
+        'id': str(record.id),
+        'name': record.name,
+        'status': record.status,
+        'department': record.department,
+    }
 
-  // Load departments on mount
-  useEffect(() => {
-    const loadDepartments = async () => {
-      try {
-        const deptResponse = await api.getDepartments();
-        setAvailableDepartments(deptResponse.departments);
-      } catch (error) {
-        console.error('Failed to load departments:', error);
-        toast.error('Failed to load departments', { description: 'Please check your connection' });
-      }
-    };
-    loadDepartments();
-  }, []);
+    if view_type == "dashboard":
+        base_dict.update({
+            'salary': record.salary,
+            'hireDate': record.hire_date,
+            'location': record.location,
+            'manager': record.manager,
+            'phone': record.phone,
+            'employeeType': record.employee_type,
+        })
+    else:  # users
+        base_dict.update({
+            'username': record.username,
+            'email': record.email,
+            'role': record.role,
+            'active': record.active,
+            'lastLogin': record.last_login,
+            'accountType': record.account_type,
+            'createdDate': record.created_date,
+            'country': record.country,
+        })
 
-  // Load statuses based on selected departments (cascading dropdown)
-  useEffect(() => {
-    const loadStatuses = async () => {
-      setLoadingStatuses(true);
-      try {
-        const statusResponse = await api.getStatusesByDepartments(selectedDepartments);
-        setAvailableStatuses(statusResponse.statuses);
+    return base_dict
 
-        // Clear selected statuses that are no longer available
-        if (selectedDepartments.length > 0) {
-          setSelectedStatuses(prev =>
-            prev.filter(status => statusResponse.statuses.includes(status))
-          );
+
+def filter_columns_by_option(data: List[dict], option: str, table_key: str) -> tuple[List[dict], List[str]]:
+    """
+    Filter columns based on the export option selected
+    Returns: (filtered_data, column_headers)
+    """
+    column_sets = {
+        'users': {
+            'all': ['id', 'username', 'email', 'role', 'status', 'active', 'lastLogin',
+                   'accountType', 'createdDate', 'department', 'country'],
+            'filtered': ['username', 'email', 'role', 'status', 'department'],
+            'selected': ['username', 'email', 'status', 'active']
+        },
+        'dashboard': {
+            'all': ['id', 'name', 'status', 'department', 'salary', 'hireDate',
+                   'location', 'manager', 'phone', 'employeeType'],
+            'filtered': ['name', 'department', 'status', 'salary', 'location'],
+            'selected': ['name', 'department', 'status']
         }
-      } catch (error) {
-        console.error('Failed to load statuses:', error);
-        toast.error('Failed to load statuses', { description: 'Please check your connection' });
-      } finally {
-        setLoadingStatuses(false);
-      }
-    };
-    loadStatuses();
-  }, [selectedDepartments]);
+    }
 
-  // Close dropdowns when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (departmentRef.current && !departmentRef.current.contains(event.target as Node)) {
-        setShowDepartmentDropdown(false);
-      }
-      if (statusRef.current && !statusRef.current.contains(event.target as Node)) {
-        setShowStatusDropdown(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+    columns = column_sets.get(table_key, {}).get(option, [])
 
-  const toggleDepartment = (dept: string) => {
-    setSelectedDepartments(prev =>
-      prev.includes(dept) ? prev.filter(d => d !== dept) : [...prev, dept]
-    );
-  };
+    if not columns:
+        if data:
+            columns = list(data[0].keys())
 
-  const toggleStatus = (status: string) => {
-    setSelectedStatuses(prev =>
-      prev.includes(status) ? prev.filter(s => s !== status) : [...prev, status]
-    );
-  };
+    filtered_data = []
+    for row in data:
+        filtered_row = {col: row.get(col, '') for col in columns}
+        filtered_data.append(filtered_row)
 
-  const handleLoadData = () => {
-    onLoadData(selectedDepartments, selectedStatuses);
-  };
+    return filtered_data, columns
 
-  return (
-    <div className="w-72 bg-white border-r border-gray-200/80 flex flex-col h-screen">
-      {/* Logo Section */}
-      <div className="p-6 border-b border-gray-100">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-teal flex items-center justify-center shadow-teal">
-            <LayoutDashboard className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <h1 className="text-lg font-bold text-gray-900 tracking-tight">DataFlow</h1>
-            <p className="text-xs text-gray-500 font-medium">Management Suite</p>
-          </div>
-        </div>
-      </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 p-4 space-y-1 overflow-y-auto custom-scrollbar">
-        <p className="px-3 mb-3 text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
-          Navigation
-        </p>
-        {menuItems.map((item, index) => {
-          const Icon = item.icon;
-          const isActive = activeScreen === item.id;
-          return (
-            <button
-              key={item.id}
-              onClick={() => onScreenChange(item.id)}
-              className={`
-                w-full flex items-center gap-3 px-4 py-3 rounded-xl
-                transition-all duration-200 font-medium text-sm
-                animate-slide-up opacity-0
-                ${isActive
-                  ? 'bg-teal-50 text-teal-700 shadow-sm border border-teal-100'
-                  : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-                }
-              `}
-              style={{ animationDelay: `${index * 0.05}s`, animationFillMode: 'forwards' }}
-            >
-              <div className={`
-                w-8 h-8 rounded-lg flex items-center justify-center transition-colors
-                ${isActive ? 'bg-teal-100' : 'bg-gray-100 group-hover:bg-gray-200'}
-              `}>
-                <Icon className={`h-4 w-4 ${isActive ? 'text-teal-600' : 'text-gray-500'}`} />
-              </div>
-              <span>{item.label}</span>
-              {isActive && (
-                <div className="ml-auto w-1.5 h-1.5 rounded-full bg-teal-500 animate-pulse-teal" />
-              )}
-            </button>
-          );
-        })}
-      </nav>
+def generate_excel(data: List[dict], columns: List[str], table_key: str) -> BytesIO:
+    """Generate an Excel file from the provided data"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = table_key.capitalize()
 
-      {/* Filters Section */}
-      <div className="p-4 border-t border-gray-100 space-y-4 bg-gray-50/50">
-        <p className="px-1 text-[10px] font-semibold text-gray-400 uppercase tracking-widest flex items-center gap-2">
-          <Filter className="w-3 h-3" />
-          Filters
-        </p>
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=12)
+    header_alignment = Alignment(horizontal="center", vertical="center")
 
-        {/* Department Filter */}
-        <div ref={departmentRef} className="relative">
-          <button
-            onClick={() => setShowDepartmentDropdown(!showDepartmentDropdown)}
-            className={`
-              w-full flex items-center justify-between px-4 py-2.5
-              bg-white border rounded-xl text-sm font-medium
-              transition-all duration-200 hover:border-teal-200 hover:shadow-sm
-              ${showDepartmentDropdown ? 'border-teal-300 shadow-sm ring-2 ring-teal-100' : 'border-gray-200'}
-            `}
-          >
-            <span className={selectedDepartments.length > 0 ? 'text-teal-700' : 'text-gray-600'}>
-              {selectedDepartments.length > 0
-                ? `${selectedDepartments.length} dept selected`
-                : 'All departments'}
-            </span>
-            <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform ${showDepartmentDropdown ? 'rotate-180' : ''}`} />
-          </button>
+    for col_idx, column in enumerate(columns, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        header_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', column)
+        header_text = header_text.replace('_', ' ').title()
+        cell.value = header_text
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_alignment
 
-          {showDepartmentDropdown && (
-            <div className="absolute bottom-full left-0 right-0 mb-2 bg-white border border-gray-200 rounded-xl shadow-xl z-20 overflow-hidden animate-scale-in">
-              <div className="p-2 border-b border-gray-100 flex items-center justify-between">
-                <span className="text-xs font-semibold text-gray-500 px-2">Departments</span>
-                {selectedDepartments.length > 0 && (
-                  <button
-                    onClick={() => setSelectedDepartments([])}
-                    className="text-xs text-teal-600 hover:text-teal-700 font-medium px-2 py-1 rounded hover:bg-teal-50"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-              <div className="max-h-48 overflow-y-auto custom-scrollbar p-1">
-                {availableDepartments.map((dept) => (
-                  <button
-                    key={dept}
-                    onClick={() => toggleDepartment(dept)}
-                    className={`
-                      w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg
-                      transition-colors
-                      ${selectedDepartments.includes(dept)
-                        ? 'bg-teal-50 text-teal-700'
-                        : 'text-gray-700 hover:bg-gray-50'
-                      }
-                    `}
-                  >
-                    <span>{dept}</span>
-                    {selectedDepartments.includes(dept) && (
-                      <Check className="h-4 w-4 text-teal-600" />
-                    )}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+    for row_idx, row_data in enumerate(data, start=2):
+        for col_idx, column in enumerate(columns, start=1):
+            value = row_data.get(column, '')
+            ws.cell(row=row_idx, column=col_idx, value=str(value) if value is not None else '')
 
-        {/* Status Filter (Cascading - filtered by selected departments) */}
-        <div ref={statusRef} className="relative">
-          <button
-            onClick={() => setShowStatusDropdown(!showStatusDropdown)}
-            disabled={loadingStatuses}
-            className={`
-              w-full flex items-center justify-between px-4 py-2.5
-              bg-white border rounded-xl text-sm font-medium
-              transition-all duration-200 hover:border-teal-200 hover:shadow-sm
-              ${showStatusDropdown ? 'border-teal-300 shadow-sm ring-2 ring-teal-100' : 'border-gray-200'}
-              ${loadingStatuses ? 'opacity-70' : ''}
-            `}
-          >
-            <span className={selectedStatuses.length > 0 ? 'text-teal-700' : 'text-gray-600'}>
-              {loadingStatuses ? (
-                <span className="flex items-center gap-2">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  Loading...
-                </span>
-              ) : selectedStatuses.length > 0
-                ? `${selectedStatuses.length} status selected`
-                : 'All statuses'}
-            </span>
-            <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform ${showStatusDropdown ? 'rotate-180' : ''}`} />
-          </button>
+    for column in ws.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 50)
+        ws.column_dimensions[column_letter].width = adjusted_width
 
-          {showStatusDropdown && !loadingStatuses && (
-            <div className="absolute bottom-full left-0 right-0 mb-2 bg-white border border-gray-200 rounded-xl shadow-xl z-20 overflow-hidden animate-scale-in">
-              <div className="p-2 border-b border-gray-100 flex items-center justify-between">
-                <div className="flex flex-col">
-                  <span className="text-xs font-semibold text-gray-500 px-2">Statuses</span>
-                  {selectedDepartments.length > 0 && (
-                    <span className="text-[10px] text-teal-600 px-2">
-                      Filtered by {selectedDepartments.length} dept(s)
-                    </span>
-                  )}
-                </div>
-                {selectedStatuses.length > 0 && (
-                  <button
-                    onClick={() => setSelectedStatuses([])}
-                    className="text-xs text-teal-600 hover:text-teal-700 font-medium px-2 py-1 rounded hover:bg-teal-50"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-              <div className="max-h-48 overflow-y-auto custom-scrollbar p-1">
-                {availableStatuses.length === 0 ? (
-                  <div className="px-3 py-4 text-sm text-gray-500 text-center">
-                    No statuses available
-                  </div>
-                ) : (
-                  availableStatuses.map((status) => (
-                    <button
-                      key={status}
-                      onClick={() => toggleStatus(status)}
-                      className={`
-                        w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg
-                        transition-colors
-                        ${selectedStatuses.includes(status)
-                          ? 'bg-teal-50 text-teal-700'
-                          : 'text-gray-700 hover:bg-gray-50'
-                        }
-                      `}
-                    >
-                      <span>{status}</span>
-                      {selectedStatuses.includes(status) && (
-                        <Check className="h-4 w-4 text-teal-600" />
-                      )}
-                    </button>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
-        </div>
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
 
-        {/* Selected filters chips */}
-        {(selectedDepartments.length > 0 || selectedStatuses.length > 0) && (
-          <div className="flex flex-wrap gap-1.5">
-            {selectedDepartments.map(dept => (
-              <span
-                key={dept}
-                className="inline-flex items-center gap-1 px-2 py-1 bg-teal-100 text-teal-700 text-xs font-medium rounded-lg"
-              >
-                {dept}
-                <button onClick={() => toggleDepartment(dept)} className="hover:text-teal-900">
-                  <X className="w-3 h-3" />
-                </button>
-              </span>
-            ))}
-            {selectedStatuses.map(status => (
-              <span
-                key={status}
-                className="inline-flex items-center gap-1 px-2 py-1 bg-emerald-100 text-emerald-700 text-xs font-medium rounded-lg"
-              >
-                {status}
-                <button onClick={() => toggleStatus(status)} className="hover:text-emerald-900">
-                  <X className="w-3 h-3" />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
 
-        {/* Load Data Button */}
-        <Button
-          onClick={handleLoadData}
-          disabled={loading}
-          className="w-full gap-2 h-11 bg-gradient-teal hover:opacity-90 text-white font-semibold shadow-teal transition-all duration-200"
-        >
-          {loading ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Loading...
-            </>
-          ) : (
-            <>
-              <Upload className="h-4 w-4" />
-              Load Data
-            </>
-          )}
-        </Button>
-      </div>
-    </div>
-  );
-}
+def generate_zip(files: dict[str, BytesIO]) -> BytesIO:
+    """Generate a ZIP file containing multiple files"""
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for filename, content in files.items():
+            content.seek(0)
+            zip_file.writestr(filename, content.read())
+    zip_buffer.seek(0)
+    return zip_buffer
 
+
+# ============================================================================
+# API Endpoints - No authentication required
+# ============================================================================
+
+@app.get("/")
+def read_root():
+    """Health check endpoint"""
+    return {"message": "Data Manager API", "version": "1.0.0"}
+
+
+@app.get("/api/dashboard")
+async def get_dashboard(
+    departments: Optional[str] = None,
+    statuses: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get dashboard data with optional filtering"""
+    dept_list = departments.split(',') if departments else None
+    status_list = statuses.split(',') if statuses else None
+
+    records = crud.get_records(db, departments=dept_list, statuses=status_list)
+    schema = build_schema("dashboard")
+    data = [record_to_dict(r, "dashboard") for r in records]
+
+    return {
+        "schema": schema.model_dump(),
+        "data": data
+    }
+
+
+@app.get("/api/users")
+async def get_users(
+    departments: Optional[str] = None,
+    statuses: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get users data with optional filtering"""
+    dept_list = departments.split(',') if departments else None
+    status_list = statuses.split(',') if statuses else None
+
+    records = crud.get_records(db, departments=dept_list, statuses=status_list)
+    schema = build_schema("users")
+    data = [record_to_dict(r, "users") for r in records]
+
+    return {
+        "schema": schema.model_dump(),
+        "data": data
+    }
+
+
+@app.get("/api/departments", response_model=schemas.DepartmentsResponse)
+async def get_departments(db: Session = Depends(get_db)):
+    """Get available departments"""
+    departments = crud.get_departments(db)
+    return {"departments": departments}
+
+
+@app.get("/api/statuses", response_model=schemas.StatusesResponse)
+async def get_statuses(
+    departments: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get available statuses, optionally filtered by departments"""
+    dept_list = departments.split(',') if departments else None
+    statuses = crud.get_statuses(db, departments=dept_list)
+    return {"statuses": statuses}
+
+
+@app.post("/api/dashboard/save", response_model=schemas.SaveResponse)
+async def save_dashboard(
+    request: schemas.SaveRequest,
+    db: Session = Depends(get_db)
+):
+    """Save dashboard data with transaction tracking"""
+    try:
+        transaction_id, records_updated = crud.update_records_with_transaction(
+            db, request.data
+        )
+        return {
+            "success": True,
+            "transaction_id": transaction_id,
+            "records_updated": records_updated
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/users/save", response_model=schemas.SaveResponse)
+async def save_users(
+    request: schemas.SaveRequest,
+    db: Session = Depends(get_db)
+):
+    """Save users data with transaction tracking"""
+    try:
+        transaction_id, records_updated = crud.update_records_with_transaction(
+            db, request.data
+        )
+        return {
+            "success": True,
+            "transaction_id": transaction_id,
+            "records_updated": records_updated
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/versions/{view_type}")
+async def get_versions(
+    view_type: str,
+    db: Session = Depends(get_db)
+):
+    """Get all saved versions for a view type"""
+    versions = crud.get_dashboard_versions(db, view_type)
+    result = []
+    for v in versions:
+        result.append({
+            "id": str(v.id),
+            "name": v.name,
+            "view_type": v.view_type,
+            "columns": v.columns,
+            "created_at": v.created_at.isoformat(),
+            "updated_at": v.updated_at.isoformat()
+        })
+    return {"versions": result}
+
+
+@app.post("/api/versions")
+async def create_version(
+    request: schemas.DashboardVersionCreate,
+    db: Session = Depends(get_db)
+):
+    """Create a new saved version"""
+    try:
+        version = crud.create_dashboard_version(db, request)
+        return {
+            "id": str(version.id),
+            "name": version.name,
+            "view_type": version.view_type,
+            "columns": version.columns,
+            "created_at": version.created_at.isoformat(),
+            "updated_at": version.updated_at.isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/versions/{version_id}")
+async def update_version(
+    version_id: str,
+    request: schemas.DashboardVersionUpdate,
+    db: Session = Depends(get_db)
+):
+    """Update an existing saved version"""
+    try:
+        from uuid import UUID
+        version = crud.update_dashboard_version(db, UUID(version_id), request)
+        if not version:
+            raise HTTPException(status_code=404, detail="Version not found")
+        return {
+            "id": str(version.id),
+            "name": version.name,
+            "view_type": version.view_type,
+            "columns": version.columns,
+            "created_at": version.created_at.isoformat(),
+            "updated_at": version.updated_at.isoformat()
+        }
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid version ID")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/versions/{version_id}")
+async def delete_version(
+    version_id: str,
+    db: Session = Depends(get_db)
+):
+    """Delete a saved version"""
+    try:
+        from uuid import UUID
+        success = crud.delete_dashboard_version(db, UUID(version_id))
+        if not success:
+            raise HTTPException(status_code=404, detail="Version not found")
+        return {"success": True}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid version ID")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/export/{table_key}")
+async def export_data(
+    table_key: str,
+    request: schemas.ExportRequest
+):
+    """Export data to Excel file"""
+    try:
+        filtered_data, columns = filter_columns_by_option(
+            request.data,
+            request.option,
+            table_key
+        )
+
+        excel_file = generate_excel(filtered_data, columns, table_key)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        excel_filename = f"{table_key}_export_{request.option}_{timestamp}.xlsx"
+
+        return StreamingResponse(
+            excel_file,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename={excel_filename}"
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("API_PORT", 8000))
+    host = os.getenv("API_HOST", "0.0.0.0")
+    uvicorn.run(app, host=host, port=port)
